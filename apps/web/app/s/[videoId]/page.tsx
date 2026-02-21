@@ -38,6 +38,7 @@ import {
 	getDashboardData,
 	type OrganizationSettings,
 } from "@/app/(org)/dashboard/dashboard-data";
+import { Logo } from "@cap/ui";
 import { OarisLogo } from "@/components/OarisLogo";
 import { createNotification } from "@/lib/Notification";
 import * as EffectRuntime from "@/lib/server";
@@ -141,9 +142,9 @@ function PolicyDeniedView({ reason }: { reason?: string }) {
 	}
 
 	return (
-		<div className="flex flex-col justify-center items-center p-4 min-h-screen text-center bg-[oklch(0.992_0.005_78.25)]">
+		<div className="flex flex-col justify-center items-center p-4 min-h-screen text-center bg-[oklch(0.992_0.005_78.25)] font-lexend">
 			<OarisLogo className="w-32 h-auto text-gray-12" />
-			<h1 className="mb-2 text-2xl font-semibold">{title}</h1>
+			<h1 className="mb-2 text-2xl font-semibold font-league-spartan">{title}</h1>
 			<p className="text-gray-400">{description}</p>
 		</div>
 	);
@@ -357,7 +358,7 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 		Effect.map((data) => (
 			<div
 				key={videoId}
-				className="flex flex-col min-h-screen bg-[oklch(0.992_0.005_78.25)]"
+				className="flex flex-col min-h-screen bg-[oklch(0.992_0.005_78.25)] font-lexend"
 			>
 				<PasswordOverlay isOpen={data.needsPassword} videoId={videoId} />
 				{!data.needsPassword && (
@@ -690,27 +691,27 @@ async function AuthorizedContent({
 			<div className="py-4 mt-auto">
 				<div className="flex flex-col justify-center items-center gap-2 mx-auto mb-2 w-fit">
 					<a
+						target="_blank"
+						href="https://cap.so"
+						rel="noopener"
+						className="flex justify-center items-center px-4 py-2 mx-auto space-x-2 bg-white rounded-full border border-gray-5 w-fit"
+					>
+						<span className="text-sm">Recorded with</span>
+						<Logo className="w-14 h-auto" />
+					</a>
+					<a
 						href="https://oaris.de"
 						target="_blank"
 						rel="noopener"
-						className="flex justify-center items-center px-4 py-2 space-x-2 bg-white rounded-full border border-gray-5"
+						className="flex items-center gap-1.5"
 					>
 						<span className="text-xs text-gray-9">bereitgestellt von</span>
-						<span className="font-league-spartan font-semibold text-sm text-gray-12">
-							oaris
-						</span>
+						<img
+							src="/oaris-wordmark.svg"
+							alt="oaris"
+							className="h-3.5 w-auto"
+						/>
 					</a>
-					<span className="text-xs text-gray-9">
-						powered by{" "}
-						<a
-							href="https://cap.so"
-							target="_blank"
-							rel="noopener"
-							className="underline hover:text-gray-11 transition-colors"
-						>
-							Cap
-						</a>
-					</span>
 				</div>
 			</div>
 		</>
