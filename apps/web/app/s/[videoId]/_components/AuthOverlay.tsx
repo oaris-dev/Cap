@@ -33,7 +33,7 @@ export const AuthOverlay: React.FC<AuthOverlayProps> = ({
 	const emailId = useId();
 	return (
 		<Dialog open={isOpen} onOpenChange={onClose}>
-			<DialogContent className="w-[90vw] bg-gray-3 relative sm:max-w-md p-6 rounded-xl">
+			<DialogContent className="w-[90vw] bg-gray-3 relative sm:max-w-md p-6 rounded-xl font-lexend">
 				{emailSent && (
 					<div
 						onClick={() => {
@@ -54,7 +54,7 @@ export const AuthOverlay: React.FC<AuthOverlayProps> = ({
 					<OarisLogo className="mx-auto w-auto h-12 text-gray-12" />
 
 					<div className="text-center">
-						<h1 className="text-xl font-semibold">
+						<h1 className="text-xl font-semibold font-league-spartan">
 							{step === 1 ? "Sign in to comment" : "Email sent"}
 						</h1>
 						<p className="text-base text-gray-9">

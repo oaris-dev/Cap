@@ -170,7 +170,7 @@ export default async function EmbedVideoPage(
 			Effect.succeed({ needsPassword: true } as const),
 		),
 		Effect.map((data) => (
-			<div className="min-h-screen bg-black">
+			<div className="min-h-screen bg-black font-lexend">
 				<PasswordOverlay isOpen={data.needsPassword} videoId={videoId} />
 				{!data.needsPassword && (
 					<EmbedContent video={data.video} autoplay={autoplay} />
@@ -180,8 +180,10 @@ export default async function EmbedVideoPage(
 		Effect.catchTags({
 			PolicyDenied: () =>
 				Effect.succeed(
-					<div className="flex flex-col justify-center items-center min-h-screen text-center text-white bg-black">
-						<h1 className="mb-4 text-2xl font-bold">This video is private</h1>
+					<div className="flex flex-col justify-center items-center min-h-screen text-center text-white bg-black font-lexend">
+						<h1 className="mb-4 text-2xl font-bold font-league-spartan">
+							This video is private
+						</h1>
 						<p className="text-gray-400">
 							If you own this video, please{" "}
 							<Link href="/login" className="text-[#3b7a6b] hover:underline">
@@ -252,7 +254,7 @@ async function EmbedContent({
 
 	if (video.isScreenshot === true) {
 		return (
-			<div className="flex justify-center items-center min-h-screen text-white bg-black">
+			<div className="flex justify-center items-center min-h-screen text-white bg-black font-lexend">
 				<p>Screenshots cannot be embedded</p>
 			</div>
 		);

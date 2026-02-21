@@ -38,12 +38,12 @@ export const PasswordOverlay: React.FC<PasswordOverlayProps> = ({
 
 	return (
 		<Dialog open={isOpen}>
-			<DialogContent className="w-[95vw] max-w-sm p-4 sm:p-6 md:p-8 sm:max-w-md">
+			<DialogContent className="w-[95vw] max-w-sm p-4 sm:p-6 md:p-8 sm:max-w-md font-lexend">
 				<div className="flex flex-col items-center space-y-4 sm:space-y-6">
 					<div className="flex flex-col items-center space-y-3 sm:space-y-4">
 						<OarisLogo className="w-16 sm:w-20 md:w-24 h-auto text-gray-12" />
 						<div className="text-center space-y-2">
-							<h2 className="text-lg sm:text-xl font-semibold text-gray-12">
+							<h2 className="text-lg sm:text-xl font-semibold text-gray-12 font-league-spartan">
 								Protected Video
 							</h2>
 							<p className="text-xs sm:text-sm text-gray-10 max-w-xs sm:max-w-sm px-2 sm:px-0">
