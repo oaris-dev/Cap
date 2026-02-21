@@ -34,8 +34,8 @@ export async function generateMetadata(
 			Option.match({
 				onNone: () => notFound(),
 				onSome: ([video]) => ({
-					title: `${video.name} | Cap Recording`,
-					description: "Watch this video on Cap",
+					title: `${video.name} | oaris`,
+					description: "Watch this video on oaris",
 					openGraph: {
 						images: [
 							{
@@ -61,8 +61,8 @@ export async function generateMetadata(
 					},
 					twitter: {
 						card: "player",
-						title: `${video.name} | Cap Recording`,
-						description: "Watch this video on Cap",
+						title: `${video.name} | oaris`,
+						description: "Watch this video on oaris",
 						images: [
 							new URL(
 								`/api/video/og?videoId=${videoId}`,
@@ -89,13 +89,13 @@ export async function generateMetadata(
 		Effect.catchTags({
 			PolicyDenied: () =>
 				Effect.succeed({
-					title: "Cap: This video is private",
+					title: "This video is private",
 					description: "This video is private and cannot be shared.",
 					robots: "noindex, nofollow",
 				}),
 			VerifyVideoPasswordError: () =>
 				Effect.succeed({
-					title: "Cap: Password Protected Video",
+					title: "Password Protected Video",
 					description: "This video is password protected.",
 					robots: "noindex, nofollow",
 				}),
@@ -182,7 +182,10 @@ export default async function EmbedVideoPage(
 					<div className="flex flex-col justify-center items-center min-h-screen text-center text-white bg-black">
 						<h1 className="mb-4 text-2xl font-bold">This video is private</h1>
 						<p className="text-gray-400">
-							If you own this video, please <Link href="/login">sign in</Link>{" "}
+							If you own this video, please{" "}
+							<Link href="/login" className="text-[#3b7a6b] hover:underline">
+								sign in
+							</Link>{" "}
 							to manage sharing.
 						</p>
 					</div>,
