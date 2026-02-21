@@ -13,6 +13,7 @@ import {
 } from "@cap/database/schema";
 import type { VideoMetadata } from "@cap/database/types";
 import { buildEnv } from "@cap/env";
+import { Logo } from "@cap/ui";
 import { userIsPro } from "@cap/utils";
 import {
 	Database,
@@ -38,7 +39,6 @@ import {
 	getDashboardData,
 	type OrganizationSettings,
 } from "@/app/(org)/dashboard/dashboard-data";
-import { Logo } from "@cap/ui";
 import { OarisLogo } from "@/components/OarisLogo";
 import { createNotification } from "@/lib/Notification";
 import * as EffectRuntime from "@/lib/server";
