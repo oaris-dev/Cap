@@ -1,6 +1,5 @@
 "use client";
 
-import { LogoSpinner } from "@cap/ui";
 import { calculateStrokeDashoffset, getProgressCircleConfig } from "@cap/utils";
 import type { Video } from "@cap/web-domain";
 import { faPlay } from "@fortawesome/free-solid-svg-icons";
@@ -10,6 +9,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import Hls from "hls.js";
 import { AlertTriangleIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { OarisLogo } from "@/components/OarisLogo";
 import { useUploadProgress } from "./ProgressCircle";
 
 const { circumference } = getProgressCircleConfig();
@@ -357,8 +357,9 @@ export function HLSVideoPlayer({
 						: "opacity-100",
 				)}
 			>
-				<div className="flex flex-col gap-2 items-center">
-					<LogoSpinner className="w-8 h-auto animate-spin sm:w-10" />
+				<div className="flex flex-col gap-3 items-center">
+					<OarisLogo className="w-8 h-auto sm:w-10 text-white" />
+					<div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin" />
 				</div>
 			</div>
 			<AnimatePresence>
@@ -431,7 +432,7 @@ export function HLSVideoPlayer({
 							exit={{ opacity: 0, y: 10 }}
 							transition={{ duration: 0.2 }}
 							onClick={() => videoRef.current?.play()}
-							className="flex absolute inset-0 z-10 justify-center items-center m-auto bg-blue-500 rounded-full transition-colors transform cursor-pointer hover:bg-blue-600 size-12 xs:size-20 md:size-32"
+							className="flex absolute inset-0 z-10 justify-center items-center m-auto bg-[#3b7a6b] rounded-full transition-colors transform cursor-pointer hover:bg-[#326b5d] size-12 xs:size-20 md:size-32"
 						>
 							<FontAwesomeIcon
 								icon={faPlay}

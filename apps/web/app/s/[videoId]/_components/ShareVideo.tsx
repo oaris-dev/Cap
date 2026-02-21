@@ -1,7 +1,6 @@
 import type { comments as commentsSchema } from "@cap/database/schema";
 import type { VideoMetadata } from "@cap/database/types";
 import { NODE_ENV } from "@cap/env";
-import { Logo } from "@cap/ui";
 import type { ImageUpload } from "@cap/web-domain";
 import { useTranscript } from "hooks/use-transcript";
 import {
@@ -12,6 +11,7 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { OarisLogo } from "@/components/OarisLogo";
 import { UpgradeModal } from "@/components/UpgradeModal";
 import type { VideoData } from "../types";
 import { type CaptionLanguage, useCaptionContext } from "./CaptionContext";
@@ -274,7 +274,7 @@ export const ShareVideo = forwardRef<
 						>
 							<div className="relative">
 								<div className="opacity-50 transition-opacity hover:opacity-100 peer">
-									<Logo className="w-auto h-4 sm:h-8" white={true} />
+									<OarisLogo className="w-auto h-4 sm:h-8 text-white" />
 								</div>
 
 								<div className="absolute left-0 top-8 transition-transform duration-300 ease-in-out origin-top scale-y-0 peer-hover:scale-y-100">

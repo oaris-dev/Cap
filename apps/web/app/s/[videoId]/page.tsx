@@ -13,7 +13,6 @@ import {
 } from "@cap/database/schema";
 import type { VideoMetadata } from "@cap/database/types";
 import { buildEnv } from "@cap/env";
-import { Logo } from "@cap/ui";
 import { userIsPro } from "@cap/utils";
 import {
 	Database,
@@ -39,6 +38,7 @@ import {
 	getDashboardData,
 	type OrganizationSettings,
 } from "@/app/(org)/dashboard/dashboard-data";
+import { OarisLogo } from "@/components/OarisLogo";
 import { createNotification } from "@/lib/Notification";
 import * as EffectRuntime from "@/lib/server";
 import { runPromise } from "@/lib/server";
@@ -141,8 +141,8 @@ function PolicyDeniedView({ reason }: { reason?: string }) {
 	}
 
 	return (
-		<div className="flex flex-col justify-center items-center p-4 min-h-screen text-center">
-			<Logo className="size-32" />
+		<div className="flex flex-col justify-center items-center p-4 min-h-screen text-center bg-[oklch(0.992_0.005_78.25)]">
+			<OarisLogo className="w-32 h-auto text-gray-12" />
 			<h1 className="mb-2 text-2xl font-semibold">{title}</h1>
 			<p className="text-gray-400">{description}</p>
 		</div>
@@ -176,8 +176,8 @@ export async function generateMetadata(
 			Option.match({
 				onNone: () => notFound(),
 				onSome: ([video]) => ({
-					title: `${video.name} | Cap Recording`,
-					description: "Watch this video on Cap",
+					title: `${video.name} | oaris`,
+					description: "Watch this video on oaris",
 					openGraph: {
 						images: [
 							{
@@ -203,8 +203,8 @@ export async function generateMetadata(
 					},
 					twitter: {
 						card: "player",
-						title: `${video.name} | Cap Recording`,
-						description: "Watch this video on Cap",
+						title: `${video.name} | oaris`,
+						description: "Watch this video on oaris",
 						images: [
 							new URL(
 								`/api/video/og?videoId=${videoId}`,
@@ -231,7 +231,7 @@ export async function generateMetadata(
 		Effect.catchTags({
 			PolicyDenied: () =>
 				Effect.succeed({
-					title: "Cap: This video is restricted",
+					title: "This video is restricted",
 					description: "This video has restricted access.",
 					openGraph: {
 						images: [
@@ -260,7 +260,7 @@ export async function generateMetadata(
 				}),
 			VerifyVideoPasswordError: () =>
 				Effect.succeed({
-					title: "Cap: Password Protected Video",
+					title: "Password Protected Video",
 					description: "This video is password protected.",
 					openGraph: {
 						images: [
@@ -276,7 +276,7 @@ export async function generateMetadata(
 					},
 					twitter: {
 						card: "summary_large_image",
-						title: "Cap: Password Protected Video",
+						title: "Password Protected Video",
 						description: "This video is password protected.",
 						images: [
 							new URL(
@@ -355,7 +355,10 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 			Effect.succeed({ needsPassword: true } as const),
 		),
 		Effect.map((data) => (
-			<div key={videoId} className="flex flex-col min-h-screen bg-gray-2">
+			<div
+				key={videoId}
+				className="flex flex-col min-h-screen bg-[oklch(0.992_0.005_78.25)]"
+			>
 				<PasswordOverlay isOpen={data.needsPassword} videoId={videoId} />
 				{!data.needsPassword && (
 					<AuthorizedContent video={data.video} searchParams={searchParams} />
@@ -685,14 +688,30 @@ async function AuthorizedContent({
 				/>
 			</div>
 			<div className="py-4 mt-auto">
-				<a
-					target="_blank"
-					href={`/?ref=video_${video.id}`}
-					className="flex justify-center items-center px-4 py-2 mx-auto mb-2 space-x-2 bg-white rounded-full border border-gray-5 w-fit"
-				>
-					<span className="text-sm">Recorded with</span>
-					<Logo className="w-14 h-auto" />
-				</a>
+				<div className="flex flex-col justify-center items-center gap-2 mx-auto mb-2 w-fit">
+					<a
+						href="https://oaris.de"
+						target="_blank"
+						rel="noopener"
+						className="flex justify-center items-center px-4 py-2 space-x-2 bg-white rounded-full border border-gray-5"
+					>
+						<span className="text-xs text-gray-9">bereitgestellt von</span>
+						<span className="font-league-spartan font-semibold text-sm text-gray-12">
+							oaris
+						</span>
+					</a>
+					<span className="text-xs text-gray-9">
+						powered by{" "}
+						<a
+							href="https://cap.so"
+							target="_blank"
+							rel="noopener"
+							className="underline hover:text-gray-11 transition-colors"
+						>
+							Cap
+						</a>
+					</span>
+				</div>
 			</div>
 		</>
 	);

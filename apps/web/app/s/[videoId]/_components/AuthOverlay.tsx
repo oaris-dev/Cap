@@ -1,5 +1,5 @@
 import { NODE_ENV } from "@cap/env";
-import { Button, Dialog, DialogContent, Input, LogoBadge } from "@cap/ui";
+import { Button, Dialog, DialogContent, Input } from "@cap/ui";
 import { faArrowLeft, faEnvelope } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import Image from "next/image";
@@ -9,6 +9,7 @@ import { signIn } from "next-auth/react";
 import { useId, useState } from "react";
 import { toast } from "sonner";
 import { trackEvent } from "@/app/utils/analytics";
+import { OarisLogo } from "@/components/OarisLogo";
 import { usePublicEnv } from "@/utils/public-env";
 import OtpForm from "./OtpForm";
 
@@ -50,7 +51,7 @@ export const AuthOverlay: React.FC<AuthOverlayProps> = ({
 					</div>
 				)}
 				<div className="space-y-6">
-					<LogoBadge className="mx-auto w-auto h-12" />
+					<OarisLogo className="mx-auto w-auto h-12 text-gray-12" />
 
 					<div className="text-center">
 						<h1 className="text-xl font-semibold">
