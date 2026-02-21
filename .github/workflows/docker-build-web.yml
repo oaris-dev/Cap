@@ -1,6 +1,14 @@
 name: "Docker Build Web"
 
 on:
+  push:
+    branches:
+      - oaris/deploy
+    paths:
+      - "apps/web/**"
+      - "packages/**"
+      - "apps/web/Dockerfile"
+      - ".github/workflows/docker-build-web.yml"
   workflow_dispatch:
     inputs:
       tag:
