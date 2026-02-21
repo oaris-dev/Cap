@@ -69,3 +69,6 @@ scripts/releases-backfill-data.txt
 analysis/
 analysis/plans/
 .ralphy
+
+# OARIS fork docs (local, not committed to public repo)
+.oaris/
