@@ -4,6 +4,7 @@ import { STRIPE_PLAN_IDS } from "@cap/utils";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { Effect } from "effect";
 import type { Metadata } from "next";
+import { League_Spartan, Lexend } from "next/font/google";
 import localFont from "next/font/local";
 import type { PropsWithChildren } from "react";
 import { SonnerToaster } from "@/components/SonnerToastProvider";
@@ -24,6 +25,18 @@ import {
 import { StripeContextProvider } from "./Layout/StripeContext";
 //@ts-expect-error
 import { script } from "./themeScript";
+
+export const leagueSpartan = League_Spartan({
+	subsets: ["latin"],
+	weight: ["400", "500", "600", "700"],
+	variable: "--font-league-spartan",
+});
+
+export const lexend = Lexend({
+	subsets: ["latin"],
+	weight: ["300", "400", "500", "600", "700"],
+	variable: "--font-lexend",
+});
 
 const defaultFont = localFont({
 	src: [
@@ -81,7 +94,10 @@ export default ({ children }: PropsWithChildren) =>
 		const bootstrapData = yield* Effect.promise(getBootstrapData);
 
 		return (
-			<html className={defaultFont.className} lang="en">
+			<html
+				className={`${defaultFont.className} ${leagueSpartan.variable} ${lexend.variable}`}
+				lang="en"
+			>
 				<head>
 					<link
 						rel="apple-touch-icon"
