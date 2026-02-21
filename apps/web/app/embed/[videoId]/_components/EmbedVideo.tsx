@@ -3,7 +3,7 @@
 import type { userSelectProps } from "@cap/database/auth/session";
 import type { comments as commentsSchema, videos } from "@cap/database/schema";
 import { NODE_ENV } from "@cap/env";
-import { Avatar, Logo } from "@cap/ui";
+import { Avatar } from "@cap/ui";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranscript } from "hooks/use-transcript";
 import {
@@ -21,6 +21,7 @@ import {
 	parseVTT,
 	type TranscriptEntry,
 } from "@/app/s/[videoId]/_components/utils/transcript-utils";
+import { OarisLogo } from "@/components/OarisLogo";
 
 declare global {
 	interface Window {
@@ -246,23 +247,26 @@ export const EmbedVideo = forwardRef<
 									</div>
 								</div>
 							</motion.div>
-							<motion.button
+							<motion.div
 								initial={{ opacity: 0, y: 10 }}
 								animate={{ opacity: 1, y: 0 }}
 								exit={{ opacity: 0, y: 10 }}
 								transition={{ duration: 0.3, delay: 0.1 }}
-								onClick={(e) => {
-									e.stopPropagation();
-									window.open("https://cap.so", "_blank");
-								}}
-								className="hidden z-10 gap-2 items-center px-3 py-2 text-sm rounded-full border backdrop-blur-sm transition-colors duration-200 sm:flex border-white/10 w-fit text-white/80 hover:text-white bg-black/50"
-								aria-label="Powered by Cap"
+								className="hidden z-10 gap-2 items-center px-3 py-2 text-sm rounded-full border backdrop-blur-sm sm:flex border-white/10 w-fit text-white/80 bg-black/50"
 							>
-								<span className="text-xs md:text-sm text-white/80">
-									Powered by
+								<OarisLogo className="h-4 w-auto text-white" />
+								<span className="text-xs text-white/60">
+									powered by{" "}
+									<a
+										href="https://cap.so"
+										target="_blank"
+										className="underline hover:text-white transition-colors"
+										rel="noopener"
+									>
+										Cap
+									</a>
 								</span>
-								<Logo className="w-auto h-4" white={true} />
-							</motion.button>
+							</motion.div>
 						</div>
 					)}
 				</AnimatePresence>
