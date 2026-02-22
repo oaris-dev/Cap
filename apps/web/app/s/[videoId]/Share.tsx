@@ -235,10 +235,6 @@ const useVideoStatus = (
 						return true;
 					}
 
-					if (!data.aiGenerationStatus && !data.summary && !data.chapters) {
-						return true;
-					}
-
 					return false;
 				}
 
@@ -247,6 +243,7 @@ const useVideoStatus = (
 
 			return shouldContinuePolling() ? 2000 : false;
 		},
+		refetchOnMount: "always",
 		refetchIntervalInBackground: false,
 		staleTime: 1000,
 	});
@@ -337,9 +334,6 @@ export const Share = ({
 				aiData.aiGenerationStatus === "QUEUED" ||
 				aiData.aiGenerationStatus === "PROCESSING"
 			) {
-				return true;
-			}
-			if (!aiData.aiGenerationStatus && !aiData.summary && !aiData.chapters) {
 				return true;
 			}
 		}
