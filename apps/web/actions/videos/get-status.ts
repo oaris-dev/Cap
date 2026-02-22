@@ -126,7 +126,9 @@ export async function getVideoStatus(
 		video.transcriptionStatus === "COMPLETE" &&
 		!metadata.aiGenerationStatus &&
 		!metadata.summary &&
-		(serverEnv().GROQ_API_KEY || serverEnv().OPENAI_API_KEY);
+		(serverEnv().MISTRAL_API_KEY ||
+			serverEnv().GROQ_API_KEY ||
+			serverEnv().OPENAI_API_KEY);
 
 	if (shouldTriggerAiGeneration) {
 		try {

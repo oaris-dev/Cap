@@ -83,6 +83,10 @@ function createServerEnv() {
 
 			/// AI providers
 			DEEPGRAM_API_KEY: z.string().optional().describe("Audio transcription"),
+			MISTRAL_API_KEY: z
+				.string()
+				.optional()
+				.describe("AI metadata via Mistral (EU-hosted, GDPR-compliant)"),
 			ANTHROPIC_API_KEY: z.string().optional().describe("AI chat"),
 			OPENAI_API_KEY: z.string().optional().describe("AI summaries"),
 			GROQ_API_KEY: z.string().optional().describe("AI summaries"),
