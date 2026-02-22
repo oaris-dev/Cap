@@ -83,6 +83,12 @@ function createServerEnv() {
 
 			/// AI providers
 			DEEPGRAM_API_KEY: z.string().optional().describe("Audio transcription"),
+			DEEPGRAM_API_URL: z
+				.string()
+				.optional()
+				.describe(
+					"Deepgram API URL. Set to https://api.eu.deepgram.com for EU data residency",
+				),
 			ANTHROPIC_API_KEY: z.string().optional().describe("AI chat"),
 			OPENAI_API_KEY: z.string().optional().describe("AI summaries"),
 			GROQ_API_KEY: z.string().optional().describe("AI summaries"),
