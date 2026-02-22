@@ -274,23 +274,64 @@ async function callAiApi(
 	prompt: string,
 	groqClient: ReturnType<typeof getGroqClient>,
 ): Promise<string> {
-	if (groqClient) {
+	if (serverEnv().MISTRAL_API_KEY) {
 		try {
-			const completion = await groqClient.chat.completions.create({
-				messages: [{ role: "user", content: prompt }],
-				model: GROQ_MODEL,
-			});
-			return completion.choices?.[0]?.message?.content || "{}";
-		} catch (groqError) {
+			return await callMistral(prompt);
+		} catch (mistralError) {
+			if (groqClient) {
+				return callWithGroqFallback(prompt, groqClient);
+			}
 			if (serverEnv().OPENAI_API_KEY) {
 				return callOpenAi(prompt);
 			}
-			throw groqError;
+			throw mistralError;
 		}
-	} else if (serverEnv().OPENAI_API_KEY) {
+	}
+	if (groqClient) {
+		return callWithGroqFallback(prompt, groqClient);
+	}
+	if (serverEnv().OPENAI_API_KEY) {
 		return callOpenAi(prompt);
 	}
 	return "{}";
+}
+
+async function callWithGroqFallback(
+	prompt: string,
+	groqClient: NonNullable<ReturnType<typeof getGroqClient>>,
+): Promise<string> {
+	try {
+		const completion = await groqClient.chat.completions.create({
+			messages: [{ role: "user", content: prompt }],
+			model: GROQ_MODEL,
+		});
+		return completion.choices?.[0]?.message?.content || "{}";
+	} catch (groqError) {
+		if (serverEnv().OPENAI_API_KEY) {
+			return callOpenAi(prompt);
+		}
+		throw groqError;
+	}
+}
+
+async function callMistral(prompt: string): Promise<string> {
+	const aiRes = await fetch("https://api.mistral.ai/v1/chat/completions", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${serverEnv().MISTRAL_API_KEY}`,
+		},
+		body: JSON.stringify({
+			model: "mistral-small-latest",
+			messages: [{ role: "user", content: prompt }],
+		}),
+	});
+	if (!aiRes.ok) {
+		const errorText = await aiRes.text();
+		throw new Error(`Mistral API error: ${aiRes.status} ${errorText}`);
+	}
+	const aiJson = await aiRes.json();
+	return aiJson.choices?.[0]?.message?.content || "{}";
 }
 
 async function callOpenAi(prompt: string): Promise<string> {
