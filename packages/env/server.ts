@@ -89,6 +89,10 @@ function createServerEnv() {
 				.describe(
 					"Deepgram API URL. Set to https://api.eu.deepgram.com for EU data residency",
 				),
+			MISTRAL_API_KEY: z
+				.string()
+				.optional()
+				.describe("AI metadata via Mistral (EU-hosted, GDPR-compliant)"),
 			ANTHROPIC_API_KEY: z.string().optional().describe("AI chat"),
 			OPENAI_API_KEY: z.string().optional().describe("AI summaries"),
 			GROQ_API_KEY: z.string().optional().describe("AI summaries"),
