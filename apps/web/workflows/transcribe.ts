@@ -240,7 +240,13 @@ async function transcribeWithDeepgram(audioUrl: string): Promise<string> {
 
 	const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
 
-	const deepgram = createClient(serverEnv().DEEPGRAM_API_KEY as string);
+	const deepgramOptions = serverEnv().DEEPGRAM_API_URL
+		? { global: { url: serverEnv().DEEPGRAM_API_URL } }
+		: undefined;
+	const deepgram = createClient(
+		serverEnv().DEEPGRAM_API_KEY as string,
+		deepgramOptions,
+	);
 
 	const { result, error } = await deepgram.listen.prerecorded.transcribeFile(
 		audioBuffer,
