@@ -216,30 +216,11 @@ const useVideoStatus = (
 				}
 
 				if (data.transcriptionStatus === "COMPLETE") {
-					if (!aiGenerationEnabled) {
-						return false;
-					}
-
-					if (
-						data.aiGenerationStatus === "SKIPPED" ||
-						data.aiGenerationStatus === "ERROR" ||
-						data.aiGenerationStatus === "COMPLETE"
-					) {
-						return false;
-					}
-
-					if (
-						data.aiGenerationStatus === "QUEUED" ||
-						data.aiGenerationStatus === "PROCESSING"
-					) {
-						return true;
-					}
-
-					if (!data.aiGenerationStatus && !data.summary && !data.chapters) {
-						return true;
-					}
-
-					return false;
+					return (
+						aiGenerationEnabled &&
+						(data.aiGenerationStatus === "QUEUED" ||
+							data.aiGenerationStatus === "PROCESSING")
+					);
 				}
 
 				return false;
@@ -326,22 +307,10 @@ export const Share = ({
 		}
 
 		if (transcriptionStatus === "COMPLETE") {
-			if (
-				aiData.aiGenerationStatus === "SKIPPED" ||
-				aiData.aiGenerationStatus === "ERROR" ||
-				aiData.aiGenerationStatus === "COMPLETE"
-			) {
-				return false;
-			}
-			if (
+			return (
 				aiData.aiGenerationStatus === "QUEUED" ||
 				aiData.aiGenerationStatus === "PROCESSING"
-			) {
-				return true;
-			}
-			if (!aiData.aiGenerationStatus && !aiData.summary && !aiData.chapters) {
-				return true;
-			}
+			);
 		}
 
 		return false;
