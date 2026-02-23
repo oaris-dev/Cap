@@ -39,17 +39,19 @@ Or trigger manually: Actions → Docker Build Web → Run workflow
 
 ## Coolify Setup
 
-### Docker Compose Template
+### Docker Compose Templates
 
-Use `docker-compose.coolify.yml` from the repo as base. Update image references:
+Two Coolify-ready compose files in `.oaris/`:
 
-```yaml
-cap-web:
-  image: ghcr.io/oaris-dev/cap-web:latest
+| File | Services | Use case |
+|------|----------|----------|
+| `docker-compose-coolify.yml` | cap-web, cap-db | Minimal setup (no transcription) |
+| `docker-compose-coolify-with-media-server.yml` | cap-web, cap-db, media-server | Full setup with transcription |
 
-media-server:
-  image: ghcr.io/capsoftware/cap-media-server:latest
-```
+The media-server is required for Deepgram transcription (extracts audio via FFmpeg).
+It uses upstream's image directly (`ghcr.io/capsoftware/cap-media-server:latest`) — no branding needed.
+
+See `.oaris/ENV-VARS.md` for full environment variable reference.
 
 ### Environment Variables
 
@@ -83,10 +85,15 @@ RESEND_FROM_DOMAIN=oaris.de
 # NEXT_PUBLIC_META_PIXEL_ID=
 # NEXT_PUBLIC_GOOGLE_AW_ID=
 
-# AI features (optional, sends data to external APIs)
-# DEEPGRAM_API_KEY=
-# GROQ_API_KEY=
-# OPENAI_API_KEY=
+# AI — Transcription (Deepgram EU)
+# DEEPGRAM_API_KEY=<key>
+# DEEPGRAM_API_URL=https://api.eu.deepgram.com
+
+# AI — Metadata & Translation (Mistral preferred for EU)
+# Fallback chain: Mistral -> Groq -> OpenAI
+# MISTRAL_API_KEY=<key>
+# GROQ_API_KEY=<key>
+# OPENAI_API_KEY=<key>
 
 # Optional domain restriction for signups
 # CAP_ALLOWED_SIGNUP_DOMAINS=oaris.de
@@ -201,9 +208,9 @@ This keeps them free of branding code so the same branch can:
 
 | Issue | Type | PR | Branch | Description |
 |-------|------|----|--------|-------------|
-| [#3](https://github.com/oaris-dev/Cap/issues/3) | bug | [#4](https://github.com/oaris-dev/Cap/pull/4) | `feature/fix-ai-skeleton-loading` | AI skeleton stays loading when keys not configured |
-| [#2](https://github.com/oaris-dev/Cap/issues/2) | enhancement | [#5](https://github.com/oaris-dev/Cap/pull/5) | `feature/deepgram-eu-endpoint` | Add Deepgram EU endpoint option |
-| [#1](https://github.com/oaris-dev/Cap/issues/1) | enhancement | [#6](https://github.com/oaris-dev/Cap/pull/6) | `feature/mistral-ai-provider` | Add Mistral API as GDPR-compliant AI provider |
+| [#3](https://github.com/oaris-dev/Cap/issues/3) | bug | [#7](https://github.com/oaris-dev/Cap/pull/7) | `feature/fix-ai-skeleton-loading` | AI skeleton stays loading when keys not configured |
+| [#2](https://github.com/oaris-dev/Cap/issues/2) | enhancement | [#8](https://github.com/oaris-dev/Cap/pull/8) | `feature/deepgram-eu-endpoint` | Add Deepgram EU endpoint option |
+| [#1](https://github.com/oaris-dev/Cap/issues/1) | enhancement | [#9](https://github.com/oaris-dev/Cap/pull/9) | `feature/mistral-ai-provider` | Add Mistral API as GDPR-compliant AI provider |
 
 ### GDPR AI implementation (see .oaris/GDPR-AI-EVALUATION.md)
 
