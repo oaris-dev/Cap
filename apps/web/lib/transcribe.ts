@@ -117,7 +117,7 @@ export async function transcribeVideo(
 
 		await db()
 			.update(videos)
-			.set({ transcriptionStatus: null })
+			.set({ transcriptionStatus: "ERROR" })
 			.where(eq(videos.id, videoId));
 
 		return {
