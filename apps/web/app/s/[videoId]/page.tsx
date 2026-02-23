@@ -40,6 +40,7 @@ import {
 	type OrganizationSettings,
 } from "@/app/(org)/dashboard/dashboard-data";
 import { OarisLogo } from "@/components/OarisLogo";
+import { OarisWordmark } from "@/components/OarisWordmark";
 import { createNotification } from "@/lib/Notification";
 import * as EffectRuntime from "@/lib/server";
 import { runPromise } from "@/lib/server";
@@ -706,11 +707,7 @@ async function AuthorizedContent({
 						className="flex items-center gap-1.5"
 					>
 						<span className="text-xs text-gray-9">bereitgestellt von</span>
-						<img
-							src="/oaris-wordmark.svg"
-							alt="oaris"
-							className="h-3.5 w-auto"
-						/>
+						<OarisWordmark className="h-3.5 w-auto text-gray-12" />
 					</a>
 				</div>
 			</div>
