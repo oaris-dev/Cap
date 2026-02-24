@@ -201,7 +201,6 @@ export const EmbedVideo = forwardRef<
 						{!isPlaying && (
 							<motion.a
 								href={`/s/${data.id}`}
-								target="_blank"
 								rel="noopener noreferrer"
 								initial={{ opacity: 0, y: 10 }}
 								animate={{ opacity: 1, y: 0 }}
@@ -221,9 +220,7 @@ export const EmbedVideo = forwardRef<
 				<div className="flex items-center justify-between px-3 py-2 bg-white flex-none">
 					<a
 						href={`/s/${data.id}`}
-						target="_blank"
 						rel="noopener noreferrer"
-						onClick={(e) => e.stopPropagation()}
 						className="min-w-0 flex-1 mr-4"
 					>
 						<p className="text-xs sm:text-sm font-medium text-gray-900 truncate hover:underline">
@@ -231,14 +228,11 @@ export const EmbedVideo = forwardRef<
 						</p>
 					</a>
 					<a
-						href="https://oaris.de"
-						target="_blank"
+						href={`/s/${data.id}`}
 						rel="noopener noreferrer"
-						onClick={(e) => e.stopPropagation()}
-						className="flex items-center gap-1.5 flex-shrink-0 text-gray-500 hover:text-gray-900 transition-colors"
+						className="flex-shrink-0 text-gray-500 hover:text-gray-900 transition-colors"
 					>
 						<OarisLogo className="w-auto h-3.5" />
-						<span className="text-xs hidden sm:inline">oaris.de</span>
 					</a>
 				</div>
 			</div>
