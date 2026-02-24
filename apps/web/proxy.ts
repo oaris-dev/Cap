@@ -34,6 +34,14 @@ export async function proxy(request: NextRequest) {
 		return response;
 	}
 
+	if (path.startsWith("/embed/")) {
+		const response = NextResponse.next();
+		response.headers.set("Access-Control-Allow-Origin", "*");
+		response.headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+		response.headers.delete("X-Frame-Options");
+		return response;
+	}
+
 	const hostname = url.hostname;
 
 	if (buildEnv.NEXT_PUBLIC_IS_CAP !== "true") {
