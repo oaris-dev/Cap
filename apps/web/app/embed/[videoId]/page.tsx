@@ -29,6 +29,11 @@ export async function generateMetadata(
 	const params = await props.params;
 	const videoId = params.videoId as Video.VideoId;
 
+	const oembedUrl = new URL(
+		`/api/oembed?url=${encodeURIComponent(new URL(`/s/${videoId}`, buildEnv.NEXT_PUBLIC_WEB_URL).toString())}`,
+		buildEnv.NEXT_PUBLIC_WEB_URL,
+	).toString();
+
 	return Effect.flatMap(Videos, (v) => v.getByIdForViewing(videoId)).pipe(
 		Effect.map(
 			Option.match({
@@ -36,6 +41,11 @@ export async function generateMetadata(
 				onSome: ([video]) => ({
 					title: `${video.name} | oaris`,
 					description: "Watch this video on oaris",
+					alternates: {
+						types: {
+							"application/json+oembed": oembedUrl,
+						},
+					},
 					openGraph: {
 						images: [
 							{
@@ -97,6 +107,11 @@ export async function generateMetadata(
 				Effect.succeed({
 					title: "Password Protected Video",
 					description: "This video is password protected.",
+					alternates: {
+						types: {
+							"application/json+oembed": oembedUrl,
+						},
+					},
 					robots: "noindex, nofollow",
 				}),
 		}),

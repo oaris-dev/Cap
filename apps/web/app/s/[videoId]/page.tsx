@@ -145,7 +145,9 @@ function PolicyDeniedView({ reason }: { reason?: string }) {
 	return (
 		<div className="flex flex-col justify-center items-center p-4 min-h-screen text-center bg-[oklch(0.992_0.005_78.25)] font-lexend">
 			<OarisLogo className="w-32 h-auto text-gray-12" />
-			<h1 className="mb-2 text-2xl font-semibold font-league-spartan">{title}</h1>
+			<h1 className="mb-2 text-2xl font-semibold font-league-spartan">
+				{title}
+			</h1>
 			<p className="text-gray-400">{description}</p>
 		</div>
 	);
@@ -173,6 +175,11 @@ export async function generateMetadata(
 		referrer.includes(domain),
 	);
 
+	const oembedUrl = new URL(
+		`/api/oembed?url=${encodeURIComponent(new URL(`/s/${videoId}`, buildEnv.NEXT_PUBLIC_WEB_URL).toString())}`,
+		buildEnv.NEXT_PUBLIC_WEB_URL,
+	).toString();
+
 	return Effect.flatMap(Videos, (v) => v.getByIdForViewing(videoId)).pipe(
 		Effect.map(
 			Option.match({
@@ -180,6 +187,11 @@ export async function generateMetadata(
 				onSome: ([video]) => ({
 					title: `${video.name} | oaris`,
 					description: "Watch this video on oaris",
+					alternates: {
+						types: {
+							"application/json+oembed": oembedUrl,
+						},
+					},
 					openGraph: {
 						images: [
 							{
@@ -264,6 +276,11 @@ export async function generateMetadata(
 				Effect.succeed({
 					title: "Password Protected Video",
 					description: "This video is password protected.",
+					alternates: {
+						types: {
+							"application/json+oembed": oembedUrl,
+						},
+					},
 					openGraph: {
 						images: [
 							{
