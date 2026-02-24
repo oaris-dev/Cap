@@ -707,7 +707,7 @@ async function AuthorizedContent({
 				/>
 			</div>
 			<div className="py-4 mt-auto">
-				<div className="flex flex-col justify-center items-center gap-2 mx-auto mb-2 w-fit">
+				<div className="flex flex-col justify-center items-center gap-4 mx-auto mb-2 w-fit">
 					<a
 						target="_blank"
 						href="https://cap.so"
