@@ -3,7 +3,6 @@
 import type { userSelectProps } from "@cap/database/auth/session";
 import type { comments as commentsSchema, videos } from "@cap/database/schema";
 import { NODE_ENV } from "@cap/env";
-import { Avatar } from "@cap/ui";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranscript } from "hooks/use-transcript";
 import {
@@ -133,7 +132,6 @@ export const EmbedVideo = forwardRef<
 
 		if (isMp4Source) {
 			videoSrc = `/api/playlist?userId=${data.ownerId}&videoId=${data.id}&videoType=mp4`;
-			// Start with CORS enabled for MP4 sources, CapVideoPlayer will disable if needed
 			enableCrossOrigin = true;
 		} else if (
 			NODE_ENV === "development" ||
@@ -173,8 +171,8 @@ export const EmbedVideo = forwardRef<
 		}, []);
 
 		return (
-			<>
-				<div className="relative w-screen h-screen rounded-xl">
+			<div className="flex flex-col w-screen h-screen bg-black">
+				<div className="relative flex-1 min-h-0">
 					{isMp4Source ? (
 						<CapVideoPlayer
 							videoId={data.id}
@@ -197,80 +195,53 @@ export const EmbedVideo = forwardRef<
 							hasActiveUpload={data.hasActiveUpload}
 						/>
 					)}
-				</div>
 
-				<AnimatePresence>
-					{!isPlaying && (
-						<div className="absolute top-3 left-3 z-10 space-y-2">
-							<motion.div
+					<AnimatePresence>
+						{!isPlaying && (
+							<motion.a
+								href={`/s/${data.id}`}
+								target="_blank"
+								rel="noopener noreferrer"
 								initial={{ opacity: 0, y: 10 }}
 								animate={{ opacity: 1, y: 0 }}
 								exit={{ opacity: 0, y: 10 }}
 								transition={{ duration: 0.3, delay: 0.2 }}
-								className="z-10 bg-black/50 backdrop-blur-md rounded-lg sm:rounded-xl px-2 py-1.5 sm:px-4 sm:py-3 border border-white/10 shadow-2xl"
+								onClick={(e) => e.stopPropagation()}
+								className="absolute top-3 left-3 z-10 bg-black/50 backdrop-blur-md rounded-lg px-3 py-1.5 border border-white/10 shadow-2xl"
 							>
-								<div className="flex gap-2 items-center sm:gap-3">
-									{ownerName && (
-										<Avatar
-											name={ownerName}
-											className="hidden flex-shrink-0 xs:flex xs:size-10"
-											letterClass="xs:text-base font-medium"
-										/>
-									)}
-									<div className="flex-1 min-w-0">
-										<a
-											href={`/s/${data.id}`}
-											target="_blank"
-											rel="noopener noreferrer"
-											className="block"
-											onClick={(e) => e.stopPropagation()}
-										>
-											<h1 className="text-xs max-w-[175px] xs:max-w-[300px] sm:max-w-[400px] font-semibold md:max-w-[500px] leading-tight text-white truncate transition-all duration-200 cursor-pointer sm:text-xl md:text-2xl hover:underline">
-												{data.name}
-											</h1>
-										</a>
-										<div className="flex items-center gap-1 sm:gap-2 mt-0.5 sm:mt-1">
-											{ownerName && (
-												<p className="text-xs font-medium text-gray-300 truncate sm:text-sm">
-													{ownerName}
-												</p>
-											)}
-											{ownerName && longestDuration > 0 && (
-												<>
-													<span className="text-xs text-gray-400">•</span>
-													<p className="text-xs text-gray-300 sm:text-sm">
-														{formatTime(longestDuration)}
-													</p>
-												</>
-											)}
-										</div>
-									</div>
-								</div>
-							</motion.div>
-							<motion.div
-								initial={{ opacity: 0, y: 10 }}
-								animate={{ opacity: 1, y: 0 }}
-								exit={{ opacity: 0, y: 10 }}
-								transition={{ duration: 0.3, delay: 0.1 }}
-								className="hidden z-10 gap-2 items-center px-3 py-2 text-sm rounded-full border backdrop-blur-sm sm:flex border-white/10 w-fit text-white/80 bg-black/50"
-							>
-								<OarisLogo className="h-4 w-auto text-white" />
-								<span className="text-xs text-white/60">
-									powered by{" "}
-									<a
-										href="https://cap.so"
-										target="_blank"
-										className="underline hover:text-white transition-colors"
-										rel="noopener"
-									>
-										Cap
-									</a>
-								</span>
-							</motion.div>
-						</div>
-					)}
-				</AnimatePresence>
-			</>
+								<h1 className="text-xs sm:text-sm font-semibold leading-tight text-white truncate max-w-[200px] sm:max-w-[400px] hover:underline">
+									{data.name}
+								</h1>
+							</motion.a>
+						)}
+					</AnimatePresence>
+				</div>
+
+				<div className="flex items-center justify-between px-3 py-2 bg-gray-950 border-t border-white/10 flex-none">
+					<div className="flex items-center gap-2 min-w-0">
+						{ownerName && (
+							<p className="text-xs text-gray-400 flex-shrink-0">{ownerName}</p>
+						)}
+						{ownerName && longestDuration > 0 && (
+							<span className="text-xs text-gray-600">&bull;</span>
+						)}
+						{longestDuration > 0 && (
+							<p className="text-xs text-gray-400">
+								{formatTime(longestDuration)}
+							</p>
+						)}
+					</div>
+					<a
+						href={`/s/${data.id}`}
+						target="_blank"
+						rel="noopener noreferrer"
+						onClick={(e) => e.stopPropagation()}
+						className="flex items-center gap-1.5 flex-shrink-0 text-white/60 hover:text-white/90 transition-colors"
+					>
+						<OarisLogo className="w-auto h-3.5 text-white/60" />
+					</a>
+				</div>
+			</div>
 		);
 	},
 );
