@@ -407,10 +407,10 @@ export const Share = ({
 	const areChaptersDisabled = isDisabled("disableChapters");
 	const isSummaryDisabled = isDisabled("disableSummary");
 	const areCaptionsDisabled = isDisabled("disableCaptions");
-	const areCommentStampsDisabled = isDisabled("disableComments");
-	const areReactionStampsDisabled = isDisabled("disableReactions");
+	const areCommentStampsDisabled = true;
+	const areReactionStampsDisabled = true;
 	const allSettingsDisabled =
-		isDisabled("disableComments") &&
+		true &&
 		isDisabled("disableSummary") &&
 		isDisabled("disableTranscript");
 
@@ -441,6 +441,7 @@ export const Share = ({
 							<Toolbar
 								onOptimisticComment={handleOptimisticComment}
 								onCommentSuccess={handleCommentSuccess}
+								disableReactions={true}
 								data={data}
 							/>
 						</div>
@@ -454,7 +455,7 @@ export const Share = ({
 									createdAt: effectiveDate,
 									transcriptionStatus,
 								}}
-								videoSettings={videoSettings}
+								videoSettings={{ ...videoSettings, disableComments: true, disableReactions: true }}
 								commentsData={commentsData}
 								setCommentsData={setCommentsData}
 								optimisticComments={optimisticComments}
@@ -476,10 +477,7 @@ export const Share = ({
 						<Toolbar
 							onOptimisticComment={handleOptimisticComment}
 							onCommentSuccess={handleCommentSuccess}
-							disableReactions={
-								videoSettings?.disableReactions ??
-								data.orgSettings?.disableReactions
-							}
+							disableReactions={true}
 							data={data}
 						/>
 					</div>
