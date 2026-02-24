@@ -24,7 +24,6 @@ export async function middleware(request: NextRequest) {
 	const url = new URL(request.url);
 	const path = url.pathname;
 
-	// Add anti-clickjacking headers for /login
 	if (path.startsWith("/login")) {
 		const response = NextResponse.next();
 		response.headers.set("X-Frame-Options", "SAMEORIGIN");
@@ -32,6 +31,14 @@ export async function middleware(request: NextRequest) {
 			"Content-Security-Policy",
 			"frame-ancestors https://cap.so",
 		);
+		return response;
+	}
+
+	if (path.startsWith("/embed/")) {
+		const response = NextResponse.next();
+		response.headers.set("Access-Control-Allow-Origin", "*");
+		response.headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+		response.headers.delete("X-Frame-Options");
 		return response;
 	}
 
