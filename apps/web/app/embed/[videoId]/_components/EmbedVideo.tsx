@@ -210,7 +210,7 @@ export const EmbedVideo = forwardRef<
 						</p>
 					</a>
 					<a
-						href={`/s/${data.id}`}
+						href="https://oaris.de"
 						target="_blank"
 						rel="noopener noreferrer"
 						className="flex-shrink-0 text-gray-500 hover:text-gray-900 transition-colors"
