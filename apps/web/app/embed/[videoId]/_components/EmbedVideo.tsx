@@ -181,6 +181,7 @@ export const EmbedVideo = forwardRef<
 						{!isPlaying && (
 							<motion.a
 								href={`/s/${data.id}`}
+								target="_blank"
 								rel="noopener noreferrer"
 								initial={{ opacity: 0, y: 10 }}
 								animate={{ opacity: 1, y: 0 }}
@@ -200,6 +201,7 @@ export const EmbedVideo = forwardRef<
 				<div className="flex items-center justify-between px-3 py-2 bg-white flex-none">
 					<a
 						href={`/s/${data.id}`}
+						target="_blank"
 						rel="noopener noreferrer"
 						className="min-w-0 flex-1 mr-4"
 					>
@@ -209,6 +211,7 @@ export const EmbedVideo = forwardRef<
 					</a>
 					<a
 						href={`/s/${data.id}`}
+						target="_blank"
 						rel="noopener noreferrer"
 						className="flex-shrink-0 text-gray-500 hover:text-gray-900 transition-colors"
 					>
