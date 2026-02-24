@@ -28,14 +28,6 @@ declare global {
 	}
 }
 
-const formatTime = (time: number) => {
-	const minutes = Math.floor(time / 60);
-	const seconds = Math.floor(time % 60);
-	return `${minutes.toString().padStart(2, "0")}:${seconds
-		.toString()
-		.padStart(2, "0")}`;
-};
-
 type CommentWithAuthor = typeof commentsSchema.$inferSelect & {
 	authorName: string | null;
 };
@@ -54,14 +46,13 @@ export const EmbedVideo = forwardRef<
 	}
 >(
 	(
-		{ data, user, comments, chapters = [], ownerName, autoplay = false },
+		{ data, user, comments, chapters = [], autoplay = false },
 		ref,
 	) => {
 		const videoRef = useRef<HTMLVideoElement>(null);
 		useImperativeHandle(ref, () => videoRef.current as HTMLVideoElement);
 
 		const [transcriptData, setTranscriptData] = useState<TranscriptEntry[]>([]);
-		const [longestDuration, setLongestDuration] = useState<number>(0);
 		const [isPlaying, setIsPlaying] = useState(false);
 		const [subtitleUrl, setSubtitleUrl] = useState<string | null>(null);
 		const [chaptersUrl, setChaptersUrl] = useState<string | null>(null);
@@ -148,15 +139,6 @@ export const EmbedVideo = forwardRef<
 		useEffect(() => {
 			if (!videoRef.current) return;
 			const player = videoRef.current;
-			const handleLoadedMetadata = () => {
-				setLongestDuration(player.duration);
-			};
-
-			if (player.readyState >= 1) {
-				setLongestDuration(player.duration);
-			} else {
-				player.addEventListener("loadedmetadata", handleLoadedMetadata);
-			}
 
 			const listener = (arg: boolean) => {
 				setIsPlaying(arg);
@@ -166,7 +148,6 @@ export const EmbedVideo = forwardRef<
 			return () => {
 				player.removeEventListener("play", () => listener(true));
 				player.removeEventListener("pause", () => listener(false));
-				player.removeEventListener("loadedmetadata", handleLoadedMetadata);
 			};
 		}, []);
 
@@ -217,28 +198,27 @@ export const EmbedVideo = forwardRef<
 					</AnimatePresence>
 				</div>
 
-				<div className="flex items-center justify-between px-3 py-2 bg-gray-950 border-t border-white/10 flex-none">
-					<div className="flex items-center gap-2 min-w-0">
-						{ownerName && (
-							<p className="text-xs text-gray-400 flex-shrink-0">{ownerName}</p>
-						)}
-						{ownerName && longestDuration > 0 && (
-							<span className="text-xs text-gray-600">&bull;</span>
-						)}
-						{longestDuration > 0 && (
-							<p className="text-xs text-gray-400">
-								{formatTime(longestDuration)}
-							</p>
-						)}
-					</div>
+				<div className="flex items-center justify-between px-3 py-2 bg-white flex-none">
 					<a
 						href={`/s/${data.id}`}
 						target="_blank"
 						rel="noopener noreferrer"
 						onClick={(e) => e.stopPropagation()}
-						className="flex items-center gap-1.5 flex-shrink-0 text-white/60 hover:text-white/90 transition-colors"
+						className="min-w-0 flex-1 mr-4"
 					>
-						<OarisLogo className="w-auto h-3.5 text-white/60" />
+						<p className="text-xs sm:text-sm font-medium text-gray-900 truncate hover:underline">
+							{data.name}
+						</p>
+					</a>
+					<a
+						href="https://oaris.de"
+						target="_blank"
+						rel="noopener noreferrer"
+						onClick={(e) => e.stopPropagation()}
+						className="flex items-center gap-1.5 flex-shrink-0 text-gray-500 hover:text-gray-900 transition-colors"
+					>
+						<OarisLogo className="w-auto h-3.5" />
+						<span className="text-xs hidden sm:inline">oaris.de</span>
 					</a>
 				</div>
 			</div>
