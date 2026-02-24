@@ -150,7 +150,7 @@ RESEND_FROM_DOMAIN=oaris.de
 
 ### Upstream Sync (weekly/bi-weekly)
 ```bash
-git fetch upstream --tags
+git fetch upstream --no-tags
 git checkout main && git merge upstream/main --ff-only && git push origin main
 git checkout oaris/deploy && git rebase main
 git push origin oaris/deploy --force-with-lease
@@ -211,6 +211,24 @@ This keeps them free of branding code so the same branch can:
 | [#3](https://github.com/oaris-dev/Cap/issues/3) | bug | [#7](https://github.com/oaris-dev/Cap/pull/7) | `feature/fix-ai-skeleton-loading` | AI skeleton stays loading when keys not configured |
 | [#2](https://github.com/oaris-dev/Cap/issues/2) | enhancement | [#8](https://github.com/oaris-dev/Cap/pull/8) | `feature/deepgram-eu-endpoint` | Add Deepgram EU endpoint option |
 | [#1](https://github.com/oaris-dev/Cap/issues/1) | enhancement | [#9](https://github.com/oaris-dev/Cap/pull/9) | `feature/mistral-ai-provider` | Add Mistral API as GDPR-compliant AI provider |
+| upstream [#1550](https://github.com/CapSoftware/Cap/issues/1550) | bug | [#11](https://github.com/oaris-dev/Cap/pull/11) | `feature/fix-self-hosted-transcription` | Fix self-hosted transcription crash loop (workflow bypass) |
+
+### Upstream PR Tracker
+
+Strategy: submit one PR at a time. Wait for human review on the current PR before submitting the next.
+Once a PR is merged upstream, sync `main`, rebase `oaris/deploy`, and the patches drop off naturally.
+
+| # | Upstream PR | Branch | Status | Depends on | Notes |
+|---|-------------|--------|--------|------------|-------|
+| 1 | [CapSoftware/Cap#1630](https://github.com/CapSoftware/Cap/pull/1630) | `feature/fix-self-hosted-transcription` | proposed — awaiting human review | — | Fixes #1550. Bot reviews received (Greptile, Tembo, Copilot). Easy wins identified but deferred until maintainer responds. Tested on staging (cap.echo.oaris.de) |
+| 2 | — | `feature/fix-ai-skeleton-loading` | ready to propose | #1 reviewed | Small fix, low risk. oaris-dev [#7](https://github.com/oaris-dev/Cap/pull/7) |
+| 3 | — | `feature/deepgram-eu-endpoint` | ready to propose | #1 reviewed | Adds `DEEPGRAM_API_URL` env var. oaris-dev [#8](https://github.com/oaris-dev/Cap/pull/8) |
+| 4 | — | `feature/mistral-ai-provider` | ready to propose | #1 reviewed | Adds Mistral as AI provider. oaris-dev [#9](https://github.com/oaris-dev/Cap/pull/9) |
+
+When updating this table:
+- Move merged PRs to a "Merged" section below
+- Update status: `proposed`, `changes requested`, `approved`, `merged`, `closed`
+- After #1 gets human feedback, adjust approach for #2-4 based on maintainer's style/preferences
 
 ### GDPR AI implementation (see .oaris/GDPR-AI-EVALUATION.md)
 
