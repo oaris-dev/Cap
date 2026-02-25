@@ -56,7 +56,10 @@ export async function getVideoStatus(
 
 	const metadata: VideoMetadata = (video.metadata as VideoMetadata) || {};
 
-	if (!video.transcriptionStatus && serverEnv().DEEPGRAM_API_KEY) {
+	if (
+		!video.transcriptionStatus &&
+		(serverEnv().MISTRAL_API_KEY || serverEnv().DEEPGRAM_API_KEY)
+	) {
 		const activeUpload = await db()
 			.select({ videoId: videoUploads.videoId })
 			.from(videoUploads)
