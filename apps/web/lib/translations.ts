@@ -249,10 +249,10 @@ function getLanguage(): string {
 	if (_cachedLang) return _cachedLang;
 
 	if (typeof window !== "undefined") {
-		const el = document.querySelector("[data-ui-lang]");
-		if (el) {
-			_cachedLang = el.getAttribute("data-ui-lang") || "en";
-			return _cachedLang;
+		const lang = document.documentElement.getAttribute("data-ui-lang");
+		if (lang) {
+			_cachedLang = lang;
+			return lang;
 		}
 	}
 

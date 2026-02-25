@@ -66,10 +66,12 @@ app.get(
 
 		const params = new URLSearchParams({ ...data, user_id: user.id });
 
+		const deepLinkScheme =
+			process.env.DESKTOP_DEEP_LINK_SCHEME || "cap-desktop";
 		const returnUrl = new URL(
 			platform === "web"
 				? `http://127.0.0.1:${port}?${params}`
-				: `cap-desktop://signin?${params}`,
+				: `${deepLinkScheme}://signin?${params}`,
 		);
 
 		return Response.redirect(returnUrl.href);
