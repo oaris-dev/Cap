@@ -99,6 +99,7 @@ Only needed if serving assets via CloudFront.
 | `CAP_VIDEOS_DEFAULT_PUBLIC` | `true` | Whether new videos are public by default |
 | `CAP_ALLOWED_SIGNUP_DOMAINS` | (none) | Comma-separated list of allowed signup email domains |
 | `DATABASE_ENCRYPTION_KEY` | (none) | 32-byte hex string for encrypting stored credentials |
+| `AI_RESPONSE_LANGUAGE` | (none) | Language for AI-generated summaries, titles, and chapters (e.g. `de`, `fr`). Defaults to English if unset |
 
 ## Build / Client-side
 
@@ -107,6 +108,7 @@ Only needed if serving assets via CloudFront.
 | `NEXT_PUBLIC_WEB_URL` | Public URL (falls back to `WEB_URL`) |
 | `NEXT_PUBLIC_DOCKER_BUILD` | Set to `true` to enable Next.js standalone output for Docker |
 | `NEXT_PUBLIC_IS_CAP` | Set only on cap.so. When unset, self-hosting mode is active (all users treated as Pro) |
+| `NEXT_PUBLIC_UI_LANGUAGE` | UI language for share/embed pages. `en` (default) or `de`. Set at build time |
 | `NEXT_PUBLIC_POSTHOG_KEY` | PostHog analytics key |
 | `NEXT_PUBLIC_POSTHOG_HOST` | PostHog host URL |
 
@@ -154,6 +156,7 @@ NEXTAUTH_SECRET=<generate with: openssl rand -base64 32>
 NEXTAUTH_URL=https://cap.oaris.de
 NEXT_PUBLIC_WEB_URL=https://cap.oaris.de
 NEXT_PUBLIC_DOCKER_BUILD=true
+NEXT_PUBLIC_UI_LANGUAGE=de
 
 # S3 (Hetzner Object Storage)
 CAP_AWS_BUCKET=your-bucket
@@ -171,6 +174,7 @@ RESEND_FROM_DOMAIN=cap.oaris.de
 DEEPGRAM_API_KEY=your-deepgram-key
 DEEPGRAM_API_URL=https://api.eu.deepgram.com
 MISTRAL_API_KEY=your-mistral-key
+AI_RESPONSE_LANGUAGE=de
 
 # Media Server — these are pre-configured in the compose file.
 # Only set manually if NOT using docker-compose-coolify-with-media-server.yml.

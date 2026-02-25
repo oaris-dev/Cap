@@ -6,6 +6,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { forwardRef, Suspense, useState } from "react";
 import type { OrganizationSettings } from "@/app/(org)/dashboard/dashboard-data";
 import { useCurrentUser } from "@/app/Layout/AuthContext";
+import { t } from "@/lib/translations";
 import type { VideoData } from "../types";
 import { Activity } from "./tabs/Activity";
 import { Settings } from "./tabs/Settings";
@@ -113,19 +114,19 @@ export const Sidebar = forwardRef<{ scrollToBottom: () => void }, SidebarProps>(
 		const tabs = [
 			{
 				id: "activity",
-				label: "Comments",
+				label: t("sidebar.comments"),
 				disabled:
 					videoSettings?.disableComments ?? data.orgSettings?.disableComments,
 			},
 			{
 				id: "summary",
-				label: "Summary",
+				label: t("sidebar.summary"),
 				disabled:
 					videoSettings?.disableSummary ?? data.orgSettings?.disableSummary,
 			},
 			{
 				id: "transcript",
-				label: "Transcript",
+				label: t("sidebar.transcript"),
 				disabled:
 					videoSettings?.disableTranscript ??
 					data.orgSettings?.disableTranscript,

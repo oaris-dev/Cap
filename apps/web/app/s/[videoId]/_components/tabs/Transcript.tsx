@@ -20,6 +20,7 @@ import {
 	SUPPORTED_LANGUAGES,
 } from "@/actions/videos/translation-languages";
 import { useCurrentUser } from "@/app/Layout/AuthContext";
+import { t } from "@/lib/translations";
 import type { VideoData } from "../../types";
 import { type CaptionLanguage, useCaptionContext } from "../CaptionContext";
 
@@ -425,7 +426,7 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 							/>
 						</svg>
 					</div>
-					<p>Transcription in progress...</p>
+					<p>{t("transcript.inProgress")}</p>
 				</div>
 			</div>
 		);
@@ -466,10 +467,10 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 				<div className="text-center">
 					<MessageSquare className="mx-auto mb-2 w-8 h-8 text-gray-300" />
 					<p className="text-sm font-medium text-gray-12">
-						No audio track detected
+						{t("transcript.noAudio")}
 					</p>
 					<p className="mt-1 text-xs text-gray-9">
-						This video doesn't contain audio for transcription
+						{t("transcript.noAudioDescription")}
 					</p>
 				</div>
 			</div>
@@ -482,10 +483,10 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 				<div className="text-center">
 					<MessageSquare className="mx-auto mb-2 w-8 h-8 text-gray-300" />
 					<p className="text-sm font-medium text-gray-12">
-						Transcription disabled
+						{t("transcript.disabled")}
 					</p>
 					<p className="mt-1 text-xs text-gray-9">
-						Transcription has been disabled for this video
+						{t("transcript.disabledDescription")}
 					</p>
 				</div>
 			</div>
@@ -507,8 +508,8 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 					<MessageSquare className="mx-auto mb-2 w-8 h-8 text-gray-300" />
 					<p className="mb-4 text-sm font-medium text-gray-12">
 						{data.transcriptionStatus === "ERROR"
-							? "Transcript not available"
-							: "No transcript available"}
+							? t("transcript.notAvailable")
+							: t("transcript.noTranscript")}
 					</p>
 					{canEdit && (
 						<Button
@@ -521,8 +522,8 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 							spinner={retryTranscriptionMutation.isPending}
 						>
 							{retryTranscriptionMutation.isPending
-								? "Retrying..."
-								: "Retry Transcription"}
+								? t("transcript.retrying")
+								: t("transcript.retryTranscription")}
 						</Button>
 					)}
 				</div>
@@ -560,7 +561,9 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 									<path d="M20 6 9 17l-5-5" />
 								</svg>
 							)}
-							{copyPressed ? "Copied" : "Copy Transcript"}
+							{copyPressed
+								? t("transcript.copied")
+								: t("transcript.copyTranscript")}
 						</Button>
 						<Button
 							onClick={downloadTranscriptFile}
@@ -586,7 +589,9 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 									<path d="M20 6 9 17l-5-5" />
 								</svg>
 							)}
-							{downloadPressed ? "Downloaded" : "Download"}
+							{downloadPressed
+								? t("transcript.downloaded")
+								: t("transcript.download")}
 						</Button>
 					</div>
 					<div className="relative" ref={languageMenuRef}>
@@ -599,9 +604,9 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 							<Globe className="w-3 h-3 text-gray-9" />
 							<span className="text-gray-12">
 								{isTranslating
-									? "Translating..."
+									? t("transcript.translating")
 									: selectedLanguage === "original"
-										? "Original"
+										? t("transcript.original")
 										: SUPPORTED_LANGUAGES[selectedLanguage]}
 							</span>
 							<ChevronDown className="w-3 h-3 text-gray-9" />
@@ -617,7 +622,7 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 									}`}
 									type="button"
 								>
-									Original
+									{t("transcript.original")}
 								</button>
 								<div className="my-1 border-t border-gray-3" />
 								{(
@@ -675,7 +680,7 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 								/>
 							</svg>
 							<p className="mt-2 text-sm text-gray-11">
-								Translating transcript...
+								{t("transcript.translatingOverlay")}
 							</p>
 						</div>
 					</div>
@@ -721,7 +726,7 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 											className="w-full text-sm leading-relaxed bg-transparent resize-none text-gray-12 placeholder:text-gray-8 focus:outline-none"
 											rows={Math.max(2, Math.ceil(editText.length / 60))}
 											onClick={(e) => e.stopPropagation()}
-											placeholder="Edit transcript text..."
+											placeholder={t("transcript.editPlaceholder")}
 										/>
 									</div>
 									<div className="flex gap-2 justify-end">
@@ -736,7 +741,7 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 											className="min-w-[70px]"
 										>
 											<X className="mr-1 w-3 h-3" />
-											Cancel
+											{t("transcript.cancel")}
 										</Button>
 										<Button
 											onClick={(e) => {
@@ -750,7 +755,7 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 											spinner={isSaving}
 										>
 											<Check className="mr-1 w-3 h-3" />
-											Save
+											{t("transcript.save")}
 										</Button>
 									</div>
 								</div>
