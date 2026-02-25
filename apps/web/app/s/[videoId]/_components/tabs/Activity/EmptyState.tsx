@@ -2,6 +2,7 @@ import { LoadingSpinner } from "@cap/ui";
 import type { FontAwesomeIconProps } from "@fortawesome/react-fontawesome";
 import type { ReactElement } from "react";
 import React from "react";
+import { t } from "@/lib/translations";
 
 const EmptyState = ({
 	commentsDisabled,
@@ -19,12 +20,12 @@ const EmptyState = ({
 		)}
 		<div className="space-y-1">
 			<h3 className="text-base font-medium text-gray-12">
-				{commentsDisabled ? "Disabled" : "No comments yet"}
+				{commentsDisabled ? t("activity.disabled") : t("activity.noComments")}
 			</h3>
 			<p className="text-sm text-gray-10">
 				{commentsDisabled
-					? "Comments are disabled for this video"
-					: "Be the first to share your thoughts!"}
+					? t("activity.commentsDisabledDescription")
+					: t("activity.firstComment")}
 			</p>
 		</div>
 	</div>
