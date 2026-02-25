@@ -59,11 +59,15 @@ At least one must be set for AI features (title, summary, chapters, translation)
 | `OPENAI_API_KEY` | OpenAI API key. Last fallback for AI summaries |
 | `ANTHROPIC_API_KEY` | Anthropic API key. Used for AI chat feature |
 
-## Transcription (Deepgram)
+## Transcription
+
+Fallback chain: Voxtral (via `MISTRAL_API_KEY`) -> Deepgram. At least one must be configured.
 
 | Variable | Description |
 |----------|-------------|
-| `DEEPGRAM_API_KEY` | Deepgram API key for audio transcription |
+| `MISTRAL_API_KEY` | Also used for Voxtral STT (primary transcription provider when set) |
+| `MISTRAL_API_URL` | Custom Mistral API base URL. Defaults to `https://api.mistral.ai`. Useful for proxies or alternative endpoints |
+| `DEEPGRAM_API_KEY` | Deepgram API key for audio transcription (fallback when Voxtral fails or only provider) |
 | `DEEPGRAM_API_URL` | Custom Deepgram endpoint. Set to `https://api.eu.deepgram.com` for EU data residency. Omit to use default US endpoint |
 
 ## Audio Enhancement

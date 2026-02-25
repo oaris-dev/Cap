@@ -85,15 +85,19 @@ RESEND_FROM_DOMAIN=oaris.de
 # NEXT_PUBLIC_META_PIXEL_ID=
 # NEXT_PUBLIC_GOOGLE_AW_ID=
 
-# AI — Transcription (Deepgram EU)
-# DEEPGRAM_API_KEY=<key>
-# DEEPGRAM_API_URL=https://api.eu.deepgram.com
-
-# AI — Metadata & Translation (Mistral preferred for EU)
-# Fallback chain: Mistral -> Groq -> OpenAI
+# AI — Single key for full pipeline (transcription + metadata + translation)
+# MISTRAL_API_KEY covers: Voxtral STT, AI summaries/titles, transcript translation
 # MISTRAL_API_KEY=<key>
-# GROQ_API_KEY=<key>
-# OPENAI_API_KEY=<key>
+# MISTRAL_API_URL=https://api.mistral.ai  # Custom endpoint (optional)
+
+# AI — Language for AI-generated content (summaries, titles, chapters)
+# AI_RESPONSE_LANGUAGE=de
+
+# AI — Fallback/alternative providers (optional)
+# DEEPGRAM_API_KEY=<key>          # Fallback STT if Voxtral fails
+# DEEPGRAM_API_URL=https://api.eu.deepgram.com  # EU endpoint
+# GROQ_API_KEY=<key>              # Fallback for AI metadata
+# OPENAI_API_KEY=<key>            # Fallback for AI metadata
 
 # Optional domain restriction for signups
 # CAP_ALLOWED_SIGNUP_DOMAINS=oaris.de
@@ -169,21 +173,64 @@ upstream/main (CapSoftware/Cap) ── never commit here
     v  (merge --ff-only)
 main ──────────────────────────── pure upstream mirror
     │
-    ├── feature/* ─────────────── always based on main (clean, no branding)
-    │                              PR to oaris/deploy for testing
-    │                              same branch can PR to upstream later
+    ├── feature/* ─────────────── feature branches (from oaris/deploy)
+    │       │                      PR to oaris/staging for review & test
+    │       │                      after validation, merge to oaris/deploy
+    │       └──────────────────── if valuable for upstream, PR to CapSoftware/Cap
     │
-    └── oaris/deploy ──────────── branding patches (rebased on main)
-                                   CI builds Docker → Coolify deploys
+    ├── oaris/staging ─────────── staging environment (cap.echo.oaris.de)
+    │                              Docker image: ghcr.io/oaris-dev/cap-web:staging
+    │                              manual build only (workflow_dispatch)
+    │
+    └── oaris/deploy ──────────── production (cap.oaris.de)
+                                   Docker image: ghcr.io/oaris-dev/cap-web:latest
+                                   auto-builds on push
 ```
 
-### Key rule: feature branches always start from `main`
+### Development workflow
 
-Feature branches must be created from `main`, never from `oaris/deploy`.
-This keeps them free of branding code so the same branch can:
+```
+1. Create feature branch from oaris/deploy
+   git checkout oaris/deploy && git checkout -b feature/my-feature
 
-1. PR into `oaris/deploy` for testing on staging (cap.oaris.de)
-2. PR directly to `CapSoftware/Cap` upstream without any rework
+2. Implement, commit, push
+   git push -u origin feature/my-feature
+
+3. PR to oaris/staging → review → squash merge
+   gh pr create --base oaris/staging
+
+4. Build staging image (manual)
+   gh workflow run "Docker Build Web" --ref oaris/staging -f tag=staging
+
+5. Test on cap.echo.oaris.de (Coolify: change image tag to "staging")
+
+6. After validation, merge oaris/staging → oaris/deploy
+   gh pr create --base oaris/deploy --head oaris/staging
+
+7. Production image auto-builds on oaris/deploy push
+   → Coolify auto-deploys cap.oaris.de
+```
+
+### Docker images
+
+| Image | Tag | Branch | Build trigger |
+|-------|-----|--------|---------------|
+| `ghcr.io/oaris-dev/cap-web` | `latest` | `oaris/deploy` | Auto on push |
+| `ghcr.io/oaris-dev/cap-web` | `staging` | `oaris/staging` | Manual only (`gh workflow run`) |
+
+Build staging image:
+```bash
+gh workflow run "Docker Build Web" --repo oaris-dev/Cap --ref oaris/staging -f tag=staging
+```
+
+### Coolify services
+
+| Service | Domain | Image tag | Purpose |
+|---------|--------|-----------|---------|
+| cap-web (prod) | `cap.oaris.de` | `latest` | Production |
+| cap-web (staging) | `cap.echo.oaris.de` | `staging` | Testing before prod |
+
+To test a staging build: change the Coolify service image tag to `staging` and redeploy.
 
 ### What lives where
 
@@ -192,26 +239,29 @@ This keeps them free of branding code so the same branch can:
 | Branding (logos, fonts, colors, footer) | `oaris/deploy` | Stays in fork permanently |
 | CI slimming (web-only) | `oaris/deploy` | Stays in fork permanently |
 | Email template text (oaris name) | `oaris/deploy` | Stays in fork permanently |
-| New features useful to all Cap users | `feature/*` (from `main`) | PR to CapSoftware/Cap |
-| Bug fixes useful to all Cap users | `feature/*` (from `main`) | PR to CapSoftware/Cap |
+| New features useful to all Cap users | `feature/*` → `oaris/staging` → `oaris/deploy` | Consider upstream PR |
+| Bug fixes useful to all Cap users | `feature/*` → `oaris/staging` → `oaris/deploy` | Consider upstream PR |
 
 ### Workflow for upstream contributions
 
-1. Create `feature/*` branch from `main` (clean upstream base)
-2. Implement the feature (single squashed commit preferred)
-3. PR to `oaris/deploy` for testing on staging (cap.oaris.de)
-4. After testing, PR the same branch to `CapSoftware/Cap:main`
+1. Implement on `feature/*` branch, PR to `oaris/staging`
+2. Test on staging (cap.echo.oaris.de)
+3. Merge to `oaris/deploy` for production
+4. If valuable for upstream: create issue on CapSoftware/Cap, then PR the feature
 5. After upstream merges, sync `main` and rebase `oaris/deploy`
 6. The feature drops off `oaris/deploy` naturally (it's now in `main`)
 
 ### Active issues (oaris-dev/Cap)
 
-| Issue | Type | PR | Branch | Description |
-|-------|------|----|--------|-------------|
-| [#3](https://github.com/oaris-dev/Cap/issues/3) | bug | [#7](https://github.com/oaris-dev/Cap/pull/7) | `feature/fix-ai-skeleton-loading` | AI skeleton stays loading when keys not configured |
-| [#2](https://github.com/oaris-dev/Cap/issues/2) | enhancement | [#8](https://github.com/oaris-dev/Cap/pull/8) | `feature/deepgram-eu-endpoint` | Add Deepgram EU endpoint option |
-| [#1](https://github.com/oaris-dev/Cap/issues/1) | enhancement | [#9](https://github.com/oaris-dev/Cap/pull/9) | `feature/mistral-ai-provider` | Add Mistral API as GDPR-compliant AI provider |
-| upstream [#1550](https://github.com/CapSoftware/Cap/issues/1550) | bug | [#11](https://github.com/oaris-dev/Cap/pull/11) | `feature/fix-self-hosted-transcription` | Fix self-hosted transcription crash loop (workflow bypass) |
+| Issue | Type | PR | Branch | Status | Description |
+|-------|------|----|--------|--------|-------------|
+| [#10](https://github.com/oaris-dev/Cap/issues/10) | enhancement | [#16](https://github.com/oaris-dev/Cap/pull/16) | `feature/voxtral-stt` | merged to staging | Voxtral STT as primary transcription provider |
+| [#15](https://github.com/oaris-dev/Cap/issues/15) | enhancement | — | `oaris/deploy` | implemented, upstream PR pending | AI_RESPONSE_LANGUAGE env var |
+| [#14](https://github.com/oaris-dev/Cap/issues/14) | enhancement | — | — | open | Embed referral tracking |
+| [#2](https://github.com/oaris-dev/Cap/issues/2) | enhancement | [#8](https://github.com/oaris-dev/Cap/pull/8) | `feature/deepgram-eu-endpoint` | implemented, upstream PR pending | Deepgram EU endpoint option |
+| [#3](https://github.com/oaris-dev/Cap/issues/3) | bug | [#7](https://github.com/oaris-dev/Cap/pull/7) | `feature/fix-ai-skeleton-loading` | implemented | AI skeleton stays loading when keys not configured |
+| [#1](https://github.com/oaris-dev/Cap/issues/1) | enhancement | [#9](https://github.com/oaris-dev/Cap/pull/9) | `feature/mistral-ai-provider` | implemented | Mistral API as GDPR-compliant AI provider |
+| upstream [#1550](https://github.com/CapSoftware/Cap/issues/1550) | bug | [#11](https://github.com/oaris-dev/Cap/pull/11) | `feature/fix-self-hosted-transcription` | upstream PR proposed | Fix self-hosted transcription crash loop |
 
 ### Upstream PR Tracker
 
