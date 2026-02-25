@@ -28,43 +28,51 @@ export async function transcribeWithVoxtral(
 	const apiKey = serverEnv().MISTRAL_API_KEY;
 	if (!apiKey) return null;
 
-	const formData = new FormData();
-	formData.append(
-		"file",
-		new Blob([audioData], { type: "audio/mpeg" }),
-		"audio.mp3",
-	);
-	formData.append("model", "voxtral-mini-latest");
-	formData.append("response_format", "verbose_json");
-	formData.append("timestamp_granularities", "word");
+	try {
+		const formData = new FormData();
+		formData.append(
+			"file",
+			new Blob([audioData], { type: "audio/mpeg" }),
+			"audio.mp3",
+		);
+		formData.append("model", "voxtral-mini-latest");
+		formData.append("response_format", "verbose_json");
+		formData.append("timestamp_granularities", "word");
 
-	const response = await fetch(
-		"https://api.mistral.ai/v1/audio/transcriptions",
-		{
-			method: "POST",
-			headers: {
-				Authorization: `Bearer ${apiKey}`,
+		const response = await fetch(
+			"https://api.mistral.ai/v1/audio/transcriptions",
+			{
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${apiKey}`,
+				},
+				body: formData,
 			},
-			body: formData,
-		},
-	);
+		);
 
-	if (!response.ok) {
-		const errorBody = await response.text();
+		if (!response.ok) {
+			const errorBody = await response.text();
+			console.error(
+				`[transcribeWithVoxtral] API error: ${response.status} ${response.statusText}`,
+				errorBody,
+			);
+			return null;
+		}
+
+		const result: VoxtralResponse = await response.json();
+
+		if (!result.segments || result.segments.length === 0) {
+			return "WEBVTT\n\n";
+		}
+
+		return voxtralToWebVTT(result.segments);
+	} catch (error) {
 		console.error(
-			`[transcribeWithVoxtral] API error: ${response.status} ${response.statusText}`,
-			errorBody,
+			"[transcribeWithVoxtral] Unexpected error:",
+			error instanceof Error ? error.message : error,
 		);
 		return null;
 	}
-
-	const result: VoxtralResponse = await response.json();
-
-	if (!result.segments || result.segments.length === 0) {
-		return "WEBVTT\n\n";
-	}
-
-	return voxtralToWebVTT(result.segments);
 }
 
 function voxtralToWebVTT(segments: VoxtralSegment[]): string {
