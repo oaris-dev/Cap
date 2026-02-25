@@ -6,8 +6,6 @@ import { useInvalidateTranscript, useTranscript } from "hooks/use-transcript";
 import {
 	Check,
 	ChevronDown,
-	Copy,
-	Download,
 	Edit3,
 	Globe,
 	MessageSquare,
@@ -22,7 +20,7 @@ import {
 import { useCurrentUser } from "@/app/Layout/AuthContext";
 import { t } from "@/lib/translations";
 import type { VideoData } from "../../types";
-import { type CaptionLanguage, useCaptionContext } from "../CaptionContext";
+import { useCaptionContext } from "../CaptionContext";
 
 interface TranscriptProps {
 	data: VideoData;
@@ -143,37 +141,13 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 	const [editingEntry, setEditingEntry] = useState<number | null>(null);
 	const [editText, setEditText] = useState<string>("");
 	const [isSaving, setIsSaving] = useState(false);
-	const [isCopying, setIsCopying] = useState(false);
-	const [copyPressed, setCopyPressed] = useState(false);
-	const [downloadPressed, setDownloadPressed] = useState(false);
 	const [showLanguageMenu, setShowLanguageMenu] = useState(false);
 	const languageMenuRef = useRef<HTMLDivElement>(null);
-
 	const selectedLanguage =
 		captionContext.selectedLanguage === "off"
 			? "original"
 			: captionContext.selectedLanguage;
 	const isTranslating = captionContext.isTranslating;
-	const translatedContent = captionContext.translatedVttContent;
-
-	useEffect(() => {
-		const handleClickOutside = (event: MouseEvent) => {
-			if (
-				languageMenuRef.current &&
-				!languageMenuRef.current.contains(event.target as Node)
-			) {
-				setShowLanguageMenu(false);
-			}
-		};
-
-		if (showLanguageMenu) {
-			document.addEventListener("mousedown", handleClickOutside);
-		}
-
-		return () => {
-			document.removeEventListener("mousedown", handleClickOutside);
-		};
-	}, [showLanguageMenu]);
 
 	const {
 		data: transcriptContent,
@@ -219,11 +193,6 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 			setTranscriptData(parsed);
 		}
 	}, [captionContext.currentVttContent, transcriptContent, selectedLanguage]);
-
-	const handleLanguageChange = async (language: CaptionLanguage) => {
-		setShowLanguageMenu(false);
-		captionContext.setSelectedLanguage(language);
-	};
 
 	const isTranscriptionProcessing = useMemo(() => {
 		if (
@@ -319,81 +288,26 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 		}
 	};
 
-	const formatTranscriptForClipboard = (entries: TranscriptEntry[]): string => {
-		return entries
-			.map((entry) => `[${entry.timestamp}] ${entry.text}`)
-			.join("\n\n");
-	};
+	useEffect(() => {
+		const handleClickOutside = (event: MouseEvent) => {
+			if (
+				languageMenuRef.current &&
+				!languageMenuRef.current.contains(event.target as Node)
+			) {
+				setShowLanguageMenu(false);
+			}
+		};
+		document.addEventListener("mousedown", handleClickOutside);
+		return () => document.removeEventListener("mousedown", handleClickOutside);
+	}, []);
 
-	const formatTranscriptAsVTT = (entries: TranscriptEntry[]): string => {
-		const vttHeader = "WEBVTT\n\n";
-
-		const vttEntries = entries.map((entry, index) => {
-			const startSeconds = entry.startTime;
-			const nextEntry = entries[index + 1];
-			const endSeconds = nextEntry ? nextEntry.startTime : startSeconds + 3;
-
-			const formatTime = (seconds: number): string => {
-				const hours = Math.floor(seconds / 3600);
-				const minutes = Math.floor((seconds % 3600) / 60);
-				const secs = Math.floor(seconds % 60);
-				const milliseconds = Math.floor((seconds % 1) * 1000);
-
-				return `${hours.toString().padStart(2, "0")}:${minutes
-					.toString()
-					.padStart(2, "0")}:${secs.toString().padStart(2, "0")}.${milliseconds
-					.toString()
-					.padStart(3, "0")}`;
-			};
-
-			return `${entry.id}\n${formatTime(startSeconds)} --> ${formatTime(
-				endSeconds,
-			)}\n${entry.text}\n`;
-		});
-
-		return vttHeader + vttEntries.join("\n");
-	};
-
-	const copyTranscriptToClipboard = async () => {
-		if (transcriptData.length === 0) return;
-
-		setIsCopying(true);
-		try {
-			const formattedTranscript = formatTranscriptForClipboard(transcriptData);
-			await navigator.clipboard.writeText(formattedTranscript);
-			setCopyPressed(true);
-			setTimeout(() => {
-				setCopyPressed(false);
-			}, 2000);
-		} catch (error) {
-			console.error("Failed to copy transcript:", error);
-		} finally {
-			setIsCopying(false);
+	const handleLanguageChange = async (language: LanguageCode | "original") => {
+		setShowLanguageMenu(false);
+		if (language === "original") {
+			captionContext.setSelectedLanguage("original");
+		} else {
+			captionContext.setSelectedLanguage(language);
 		}
-	};
-
-	const downloadTranscriptFile = () => {
-		if (transcriptData.length === 0) return;
-
-		const vttContent = formatTranscriptAsVTT(transcriptData);
-		const blob = new Blob([vttContent], { type: "text/vtt" });
-		const url = URL.createObjectURL(blob);
-
-		const langSuffix =
-			selectedLanguage === "original" ? "" : `.${selectedLanguage}`;
-		const link = document.createElement("a");
-		link.href = url;
-		link.download = `transcript-${data.id}${langSuffix}.vtt`;
-		document.body.appendChild(link);
-		link.click();
-		document.body.removeChild(link);
-
-		URL.revokeObjectURL(url);
-
-		setDownloadPressed(true);
-		setTimeout(() => {
-			setDownloadPressed(false);
-		}, 2000);
 	};
 
 	const canEdit = user?.id === data.owner.id && selectedLanguage === "original";
@@ -533,126 +447,52 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 
 	return (
 		<div className="flex flex-col h-full">
-			<div className="p-4 border-b border-gray-3">
-				<div className="flex flex-col gap-3">
-					<div className="flex gap-2 justify-end">
-						<Button
-							onClick={copyTranscriptToClipboard}
-							disabled={isCopying || transcriptData.length === 0}
-							variant="white"
-							size="xs"
-							spinner={isCopying}
-						>
-							{!copyPressed ? (
-								<Copy className="mr-1 w-3 h-3" />
-							) : (
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									width="12"
-									height="12"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									strokeWidth="2"
-									strokeLinecap="round"
-									strokeLinejoin="round"
-									className="mr-1 w-3 h-3 svgpathanimation"
-								>
-									<path d="M20 6 9 17l-5-5" />
-								</svg>
-							)}
-							{copyPressed
-								? t("transcript.copied")
-								: t("transcript.copyTranscript")}
-						</Button>
-						<Button
-							onClick={downloadTranscriptFile}
-							disabled={transcriptData.length === 0}
-							variant="white"
-							size="xs"
-						>
-							{!downloadPressed ? (
-								<Download className="mr-1 w-3 h-3" />
-							) : (
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									width="12"
-									height="12"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									strokeWidth="2"
-									strokeLinecap="round"
-									strokeLinejoin="round"
-									className="mr-1 w-3 h-3 svgpathanimation"
-								>
-									<path d="M20 6 9 17l-5-5" />
-								</svg>
-							)}
-							{downloadPressed
-								? t("transcript.downloaded")
-								: t("transcript.download")}
-						</Button>
-					</div>
+			{captionContext.availableTranslations.length > 0 && (
+				<div className="flex items-center justify-end px-4 py-2 border-b border-gray-3">
 					<div className="relative" ref={languageMenuRef}>
 						<button
-							onClick={() => setShowLanguageMenu(!showLanguageMenu)}
-							disabled={isTranslating || transcriptData.length === 0}
-							className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-gray-3 bg-gray-1 hover:bg-gray-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
 							type="button"
+							onClick={() => setShowLanguageMenu(!showLanguageMenu)}
+							className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-gray-11 hover:text-gray-12 hover:bg-gray-3 rounded-md transition-colors"
 						>
-							<Globe className="w-3 h-3 text-gray-9" />
-							<span className="text-gray-12">
-								{isTranslating
-									? t("transcript.translating")
-									: selectedLanguage === "original"
-										? t("transcript.original")
-										: SUPPORTED_LANGUAGES[selectedLanguage]}
-							</span>
-							<ChevronDown className="w-3 h-3 text-gray-9" />
+							<Globe className="w-3.5 h-3.5" />
+							{selectedLanguage === "original"
+								? t("transcript.original")
+								: SUPPORTED_LANGUAGES[selectedLanguage]}
+							<ChevronDown className="w-3 h-3" />
 						</button>
 						{showLanguageMenu && (
-							<div className="absolute left-0 top-full mt-1 z-50 w-48 py-1 bg-gray-1 border border-gray-3 rounded-lg shadow-lg max-h-64 overflow-y-auto">
+							<div className="absolute right-0 top-full mt-1 w-48 bg-gray-1 border border-gray-4 rounded-lg shadow-lg z-20 py-1 max-h-64 overflow-y-auto">
 								<button
+									type="button"
 									onClick={() => handleLanguageChange("original")}
-									className={`w-full px-3 py-1.5 text-left text-xs hover:bg-gray-2 transition-colors ${
+									className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-3 transition-colors ${
 										selectedLanguage === "original"
 											? "text-blue-500 font-medium"
-											: "text-gray-12"
+											: "text-gray-11"
 									}`}
-									type="button"
 								>
 									{t("transcript.original")}
 								</button>
-								<div className="my-1 border-t border-gray-3" />
-								{(
-									Object.entries(SUPPORTED_LANGUAGES) as [
-										LanguageCode,
-										string,
-									][]
-								).map(([code, name]) => (
+								{captionContext.availableTranslations.map((translation) => (
 									<button
-										key={code}
-										onClick={() => handleLanguageChange(code)}
-										className={`w-full px-3 py-1.5 text-left text-xs hover:bg-gray-2 transition-colors ${
-											selectedLanguage === code
-												? "text-blue-500 font-medium"
-												: "text-gray-12"
-										}`}
+										key={translation.code}
 										type="button"
+										onClick={() => handleLanguageChange(translation.code)}
+										className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-3 transition-colors ${
+											selectedLanguage === translation.code
+												? "text-blue-500 font-medium"
+												: "text-gray-11"
+										}`}
 									>
-										{name}
-										{captionContext.translatedVttContent.has(code) && (
-											<span className="ml-1.5 text-gray-9">(cached)</span>
-										)}
+										{translation.name}
 									</button>
 								))}
 							</div>
 						)}
 					</div>
 				</div>
-			</div>
-
+			)}
 			<div className="overflow-y-auto flex-1 relative">
 				{isTranslating && (
 					<div className="absolute inset-0 bg-gray-1/80 flex items-center justify-center z-10">
