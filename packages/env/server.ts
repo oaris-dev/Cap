@@ -93,6 +93,12 @@ function createServerEnv() {
 				.string()
 				.optional()
 				.describe("AI metadata via Mistral (EU-hosted, GDPR-compliant)"),
+			MISTRAL_API_URL: z
+				.string()
+				.optional()
+				.describe(
+					"Mistral API URL. Defaults to https://api.mistral.ai",
+				),
 			ANTHROPIC_API_KEY: z.string().optional().describe("AI chat"),
 			OPENAI_API_KEY: z.string().optional().describe("AI summaries"),
 			GROQ_API_KEY: z.string().optional().describe("AI summaries"),
