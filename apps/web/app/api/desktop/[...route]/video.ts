@@ -366,7 +366,7 @@ app.post(
 							),
 						);
 				}
-			} else {
+			} else if (uploaded < total) {
 				await db().insert(videoUploads).values({
 					videoId,
 					uploaded,

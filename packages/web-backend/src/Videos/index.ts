@@ -353,6 +353,8 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 							return;
 						}
 
+						if (uploaded === total) return;
+
 						await tx.insert(Db.videoUploads).values({
 							videoId,
 							uploaded,
