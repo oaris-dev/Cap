@@ -24,7 +24,9 @@ export const RecordVideoPage = () => {
 		window.addEventListener("pagehide", onChange, { once: true });
 		window.addEventListener("blur", onChange, { once: true });
 
-		window.location.href = "cap-desktop://";
+		window.location.href =
+			(process.env.NEXT_PUBLIC_DESKTOP_DEEP_LINK_SCHEME || "cap-desktop") +
+			"://";
 
 		if (checkingRef.current) clearTimeout(checkingRef.current);
 		checkingRef.current = setTimeout(() => {

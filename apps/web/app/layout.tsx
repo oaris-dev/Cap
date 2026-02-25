@@ -96,7 +96,8 @@ export default ({ children }: PropsWithChildren) =>
 		return (
 			<html
 				className={`${defaultFont.className} ${leagueSpartan.variable} ${lexend.variable}`}
-				lang="en"
+				lang={process.env.NEXT_PUBLIC_UI_LANGUAGE || "en"}
+				data-ui-lang={process.env.NEXT_PUBLIC_UI_LANGUAGE || "en"}
 			>
 				<head>
 					<link
