@@ -40,7 +40,6 @@ import {
 	type OrganizationSettings,
 } from "@/app/(org)/dashboard/dashboard-data";
 import { OarisLogo } from "@/components/OarisLogo";
-import { OarisWordmark } from "@/components/OarisWordmark";
 import { createNotification } from "@/lib/Notification";
 import * as EffectRuntime from "@/lib/server";
 import { runPromise } from "@/lib/server";
@@ -707,7 +706,7 @@ async function AuthorizedContent({
 				/>
 			</div>
 			<div className="py-4 mt-auto">
-				<div className="flex flex-col justify-center items-center gap-4 mx-auto mb-2 w-fit">
+				<div className="flex flex-col justify-center items-center gap-3 mx-auto mb-2 w-fit">
 					<a
 						target="_blank"
 						href="https://cap.so"
@@ -717,15 +716,34 @@ async function AuthorizedContent({
 						<span className="text-sm">Recorded with</span>
 						<Logo className="w-14 h-auto" />
 					</a>
-					<a
-						href="https://oaris.de"
-						target="_blank"
-						rel="noopener"
-						className="flex items-center gap-1.5"
-					>
-						<span className="text-xs text-gray-9">bereitgestellt von</span>
-						<OarisWordmark className="h-3.5 w-auto text-gray-12" />
-					</a>
+					<div className="flex items-center gap-3 text-xs text-gray-9">
+						<a
+							href="https://oaris.de/impressum"
+							target="_blank"
+							rel="noopener"
+							className="hover:text-gray-12 transition-colors"
+						>
+							Impressum
+						</a>
+						<span>·</span>
+						<a
+							href="https://oaris.de/datenschutz"
+							target="_blank"
+							rel="noopener"
+							className="hover:text-gray-12 transition-colors"
+						>
+							Datenschutz
+						</a>
+						<span>·</span>
+						<a
+							href="https://oaris.de/kontakt"
+							target="_blank"
+							rel="noopener"
+							className="hover:text-gray-12 transition-colors"
+						>
+							Kontakt
+						</a>
+					</div>
 				</div>
 			</div>
 		</>
