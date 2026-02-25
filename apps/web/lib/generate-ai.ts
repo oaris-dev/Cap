@@ -292,6 +292,25 @@ function chunkTranscriptWithTimestamps(
 	return chunks;
 }
 
+function getLanguageInstruction(): string {
+	const lang = serverEnv().AI_RESPONSE_LANGUAGE;
+	if (!lang || lang.toLowerCase() === "en") return "";
+	const languageNames: Record<string, string> = {
+		de: "German",
+		fr: "French",
+		es: "Spanish",
+		it: "Italian",
+		pt: "Portuguese",
+		nl: "Dutch",
+		pl: "Polish",
+		ja: "Japanese",
+		ko: "Korean",
+		zh: "Chinese",
+	};
+	const name = languageNames[lang.toLowerCase()] || lang;
+	return `\nIMPORTANT: Respond entirely in ${name}. All titles, summaries, chapter names, and key points must be written in ${name}.`;
+}
+
 async function callAiApi(
 	prompt: string,
 	groqClient: ReturnType<typeof getGroqClient>,
@@ -390,7 +409,8 @@ async function generateSingleChunk(
 	transcriptText: string,
 	groqClient: ReturnType<typeof getGroqClient>,
 ): Promise<AiResult> {
-	const prompt = `You are Cap AI, an expert at analyzing video content and creating comprehensive summaries.
+	const langInstruction = getLanguageInstruction();
+	const prompt = `You are an expert at analyzing video content and creating comprehensive summaries.
 
 Analyze this transcript thoroughly and provide a detailed JSON response:
 {
@@ -405,7 +425,7 @@ Guidelines:
 - For longer content, organize the summary by topic or chronologically
 - Include specific details, names, numbers, and conclusions mentioned
 - Chapters should mark distinct topic changes or sections
-
+${langInstruction}
 Return ONLY valid JSON without any markdown formatting or code blocks.
 Transcript:
 ${transcriptText}`;
@@ -418,6 +438,7 @@ async function generateMultipleChunks(
 	chunks: { text: string; startTime: number; endTime: number }[],
 	groqClient: ReturnType<typeof getGroqClient>,
 ): Promise<AiResult> {
+	const langInstruction = getLanguageInstruction();
 	const chunkSummaries: {
 		summary: string;
 		keyPoints: string[];
@@ -430,7 +451,7 @@ async function generateMultipleChunks(
 		const chunk = chunks[i];
 		if (!chunk) continue;
 
-		const chunkPrompt = `You are Cap AI, an expert at analyzing video content. This is section ${i + 1} of ${chunks.length} from a longer video (timestamp ${Math.floor(chunk.startTime / 60)}:${String(chunk.startTime % 60).padStart(2, "0")} to ${Math.floor(chunk.endTime / 60)}:${String(chunk.endTime % 60).padStart(2, "0")}).
+		const chunkPrompt = `You are an expert at analyzing video content. This is section ${i + 1} of ${chunks.length} from a longer video (timestamp ${Math.floor(chunk.startTime / 60)}:${String(chunk.startTime % 60).padStart(2, "0")} to ${Math.floor(chunk.endTime / 60)}:${String(chunk.endTime % 60).padStart(2, "0")}).
 
 Analyze this section thoroughly and provide JSON:
 {
@@ -440,7 +461,7 @@ Analyze this section thoroughly and provide JSON:
 }
 
 Be thorough - this summary will be combined with other sections to create a comprehensive overview.
-Return ONLY valid JSON without any markdown formatting or code blocks.
+${langInstruction}Return ONLY valid JSON without any markdown formatting or code blocks.
 Transcript section:
 ${chunk.text}`;
 
@@ -479,7 +500,7 @@ ${chunk.text}`;
 		})
 		.join("\n\n");
 
-	const finalPrompt = `You are Cap AI, an expert at synthesizing information into comprehensive, well-organized summaries.
+	const finalPrompt = `You are an expert at synthesizing information into comprehensive, well-organized summaries.
 
 Based on these detailed section analyses of a video, create a thorough final summary that captures EVERYTHING important.
 
@@ -495,6 +516,7 @@ Provide JSON in the following format:
 }
 
 The summary must be detailed and comprehensive - not a brief overview. Capture all the important information from every section.
+${langInstruction}
 Return ONLY valid JSON without any markdown formatting or code blocks.`;
 
 	const finalContent = await callAiApi(finalPrompt, groqClient);

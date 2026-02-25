@@ -96,6 +96,12 @@ function createServerEnv() {
 			ANTHROPIC_API_KEY: z.string().optional().describe("AI chat"),
 			OPENAI_API_KEY: z.string().optional().describe("AI summaries"),
 			GROQ_API_KEY: z.string().optional().describe("AI summaries"),
+			AI_RESPONSE_LANGUAGE: z
+				.string()
+				.optional()
+				.describe(
+					"Language for AI-generated summaries, titles, and chapters (e.g., 'de', 'fr', 'en'). Defaults to English if unset.",
+				),
 			REPLICATE_API_TOKEN: z
 				.string()
 				.optional()
