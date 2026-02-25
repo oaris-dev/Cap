@@ -32,15 +32,17 @@ export async function transcribeWithVoxtral(
 		const formData = new FormData();
 		formData.append(
 			"file",
-			new Blob([audioData], { type: "audio/mpeg" }),
+			new Blob([new Uint8Array(audioData)], { type: "audio/mpeg" }),
 			"audio.mp3",
 		);
 		formData.append("model", "voxtral-mini-latest");
 		formData.append("response_format", "verbose_json");
 		formData.append("timestamp_granularities", "word");
 
+		const baseUrl =
+			serverEnv().MISTRAL_API_URL ?? "https://api.mistral.ai";
 		const response = await fetch(
-			"https://api.mistral.ai/v1/audio/transcriptions",
+			`${baseUrl}/v1/audio/transcriptions`,
 			{
 				method: "POST",
 				headers: {
@@ -62,7 +64,7 @@ export async function transcribeWithVoxtral(
 		const result: VoxtralResponse = await response.json();
 
 		if (!result.segments || result.segments.length === 0) {
-			return "WEBVTT\n\n";
+			return null;
 		}
 
 		return voxtralToWebVTT(result.segments);
