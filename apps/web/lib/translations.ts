@@ -94,6 +94,13 @@ const en = {
 	"toolbar.comment": "Comment",
 	"toolbar.cancel": "Cancel",
 
+	"time.now": "now",
+	"time.minutesAgo": "{n}m ago",
+	"time.hoursAgo": "{n}h ago",
+	"time.daysAgo": "{n}d ago",
+	"time.monthsAgo": "{n}mo ago",
+	"time.yearsAgo": "{n}y ago",
+
 	"share.recordedWith": "Recorded with",
 	"share.videoPrivate": "This video is private",
 	"share.signInToManage": "sign in",
@@ -206,6 +213,13 @@ const de: Record<keyof typeof en, string> = {
 	"toolbar.comment": "Kommentieren",
 	"toolbar.cancel": "Abbrechen",
 
+	"time.now": "jetzt",
+	"time.minutesAgo": "vor {n} Min.",
+	"time.hoursAgo": "vor {n} Std.",
+	"time.daysAgo": "vor {n} T.",
+	"time.monthsAgo": "vor {n} Mon.",
+	"time.yearsAgo": "vor {n} J.",
+
 	"share.recordedWith": "Aufgenommen mit",
 	"share.videoPrivate": "Dieses Video ist privat",
 	"share.signInToManage": "anmelden",
@@ -229,8 +243,27 @@ const dictionaries: Record<string, Record<TranslationKey, string>> = {
 	de,
 };
 
-function getDictionary(): Record<TranslationKey, string> {
+let _cachedLang: string | null = null;
+
+function getLanguage(): string {
+	if (_cachedLang) return _cachedLang;
+
+	if (typeof window !== "undefined") {
+		const el = document.querySelector("[data-ui-lang]");
+		if (el) {
+			_cachedLang = el.getAttribute("data-ui-lang") || "en";
+			return _cachedLang;
+		}
+	}
+
 	const lang = buildEnv.NEXT_PUBLIC_UI_LANGUAGE || "en";
+	if (typeof window === "undefined") return lang;
+	_cachedLang = lang;
+	return lang;
+}
+
+function getDictionary(): Record<TranslationKey, string> {
+	const lang = getLanguage();
 	return dictionaries[lang] || en;
 }
 
@@ -250,5 +283,5 @@ export function tParam(
 }
 
 export function getUiLanguage(): string {
-	return buildEnv.NEXT_PUBLIC_UI_LANGUAGE || "en";
+	return getLanguage();
 }
