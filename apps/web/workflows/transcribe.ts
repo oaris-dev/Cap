@@ -31,6 +31,7 @@ import {
 } from "@/lib/media-client";
 import { runPromise } from "@/lib/server";
 import { type DeepgramResult, formatToWebVTT } from "@/lib/transcribe-utils";
+import { transcribeWithVoxtral } from "@/lib/transcribe-voxtral";
 
 interface TranscribeWorkflowPayload {
 	videoId: string;
@@ -80,12 +81,7 @@ export async function transcribeVideoWorkflow(
 	// 	await markEnhancedAudioProcessing(videoId);
 	// }
 
-	const [transcription] = await Promise.all([
-		transcribeWithDeepgram(audioUrl),
-		// shouldEnhanceAudio
-		// 	? enhanceAndSaveAudio(videoId, userId, audioUrl, videoData.bucketId)
-		// 	: Promise.resolve(),
-	]);
+	const [transcription] = await Promise.all([transcribeAudio(audioUrl)]);
 
 	await saveTranscription(videoId, userId, videoData.bucketId, transcription);
 
@@ -101,8 +97,8 @@ export async function transcribeVideoWorkflow(
 async function validateVideo(videoId: string): Promise<VideoData> {
 	"use step";
 
-	if (!serverEnv().DEEPGRAM_API_KEY) {
-		throw new FatalError("Missing DEEPGRAM_API_KEY");
+	if (!serverEnv().MISTRAL_API_KEY && !serverEnv().DEEPGRAM_API_KEY) {
+		throw new FatalError("Missing MISTRAL_API_KEY or DEEPGRAM_API_KEY");
 	}
 
 	const query = await db()
@@ -293,7 +289,7 @@ async function resolveVideoSourceUrl(
 	throw new Error("Video file not accessible");
 }
 
-async function transcribeWithDeepgram(audioUrl: string): Promise<string> {
+async function transcribeAudio(audioUrl: string): Promise<string> {
 	"use step";
 
 	const audioResponse = await fetch(audioUrl);
@@ -304,6 +300,24 @@ async function transcribeWithDeepgram(audioUrl: string): Promise<string> {
 	}
 
 	const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
+
+	if (serverEnv().MISTRAL_API_KEY) {
+		console.log("[transcribe] Attempting Voxtral transcription");
+		const voxtralResult = await transcribeWithVoxtral(audioBuffer);
+		if (voxtralResult) {
+			console.log("[transcribe] Voxtral transcription succeeded");
+			return voxtralResult;
+		}
+		console.warn(
+			"[transcribe] Voxtral transcription failed, trying Deepgram fallback",
+		);
+	}
+
+	if (!serverEnv().DEEPGRAM_API_KEY) {
+		throw new Error(
+			"Voxtral transcription failed and no DEEPGRAM_API_KEY configured for fallback",
+		);
+	}
 
 	const deepgramApiUrl = serverEnv().DEEPGRAM_API_URL;
 	const deepgramOptions = deepgramApiUrl
