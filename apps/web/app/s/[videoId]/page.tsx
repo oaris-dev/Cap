@@ -694,9 +694,11 @@ async function AuthorizedContent({
 		};
 	}).pipe(runPromise);
 
+	const uiLang = process.env.NEXT_PUBLIC_UI_LANGUAGE || "en";
+
 	return (
 		<>
-			<div className="container flex-1 px-4 mx-auto">
+			<div className="container flex-1 px-4 mx-auto" data-ui-lang={uiLang}>
 				<ShareHeader
 					data={{
 						...videoWithOrganizationInfo,
