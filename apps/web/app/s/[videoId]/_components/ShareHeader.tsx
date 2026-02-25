@@ -21,6 +21,7 @@ import { useCurrentUser } from "@/app/Layout/AuthContext";
 import { SignedImageUrl } from "@/components/SignedImageUrl";
 import { Tooltip } from "@/components/Tooltip";
 import { UpgradeModal } from "@/components/UpgradeModal";
+import { t } from "@/lib/translations";
 import { usePublicEnv } from "@/utils/public-env";
 import type { VideoData } from "../types";
 
@@ -77,13 +78,13 @@ export const ShareHeader = ({
 		if (next === "" || next === data.name) return;
 		try {
 			await editTitle(data.id, title);
-			toast.success("Video title updated");
+			toast.success(t("header.titleUpdated"));
 			refresh();
 		} catch (error) {
 			if (error instanceof Error) {
 				toast.error(error.message);
 			} else {
-				toast.error("Failed to update title - please try again.");
+				toast.error(t("header.titleUpdateFailed"));
 			}
 		}
 	};
@@ -148,7 +149,7 @@ export const ShareHeader = ({
 						variant="outline"
 						onClick={() => setIsSharingDialogOpen(true)}
 					>
-						Not shared{" "}
+						{t("header.notShared")}{" "}
 						<FontAwesomeIcon className="ml-2 size-2.5" icon={faChevronDown} />
 					</Button>
 				);
@@ -160,7 +161,7 @@ export const ShareHeader = ({
 						variant="outline"
 						onClick={() => setIsSharingDialogOpen(true)}
 					>
-						Shared{" "}
+						{t("header.shared")}{" "}
 						<FontAwesomeIcon className="ml-1 size-2.5" icon={faChevronDown} />
 					</Button>
 				);
@@ -172,7 +173,7 @@ export const ShareHeader = ({
 					size="xs"
 					variant="outline"
 				>
-					Shared with you
+					{t("header.sharedWithYou")}
 				</Button>
 			);
 		}
@@ -185,7 +186,7 @@ export const ShareHeader = ({
 			{userIsOwnerAndNotPro && (
 				<div className="flex sticky flex-col sm:flex-row inset-x-0 top-0 z-10 gap-4 justify-center items-center px-3 py-2 mx-auto w-[calc(100%-20px)] max-w-fit rounded-b-xl border bg-gray-4 border-gray-6">
 					<p className="text-center text-gray-12">
-						Shareable links are limited to 5 mins on the free plan.
+						{t("header.linkLimitedFree")}
 					</p>
 					<Button
 						type="button"
@@ -193,7 +194,7 @@ export const ShareHeader = ({
 						size="sm"
 						variant="blue"
 					>
-						Upgrade To Cap Pro
+						{t("header.upgradePro")}
 					</Button>
 				</div>
 			)}
@@ -293,7 +294,7 @@ export const ShareHeader = ({
 										onClick={() => setUpgradeModalOpen(true)}
 									>
 										<Globe2 className="mr-1 w-4 h-4" />
-										Connect a custom domain
+										{t("header.connectCustomDomain")}
 									</button>
 								)}
 							</div>
@@ -301,7 +302,7 @@ export const ShareHeader = ({
 								<div className="hidden md:flex gap-2">
 									{isOwner && (
 										<Tooltip
-											content="View analytics"
+											content={t("header.viewAnalytics")}
 											className="bg-gray-12 text-gray-1 border-gray-11 shadow-lg"
 											delayDuration={100}
 										>
@@ -325,9 +326,9 @@ export const ShareHeader = ({
 										}}
 									>
 										<span className="hidden text-sm text-white lg:block">
-											Go to
+											{t("header.goTo")}
 										</span>{" "}
-										Dashboard
+										{t("header.dashboard")}
 									</Button>
 								</div>
 							)}

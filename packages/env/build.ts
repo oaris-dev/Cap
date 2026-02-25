@@ -15,6 +15,7 @@ const create = () =>
 			NEXT_PUBLIC_GOOGLE_AW_ID: z.string().optional(),
 			NEXT_PUBLIC_WEB_URL: z.string(),
 			NEXT_PUBLIC_DOCKER_BUILD: z.string().optional(),
+			NEXT_PUBLIC_UI_LANGUAGE: z.string().optional().default("en"),
 		},
 		runtimeEnv: {
 			NEXT_PUBLIC_IS_CAP: process.env.NEXT_PUBLIC_IS_CAP,
@@ -25,6 +26,7 @@ const create = () =>
 			NEXT_PUBLIC_WEB_URL:
 				process.env.WEB_URL ?? process.env.NEXT_PUBLIC_WEB_URL,
 			NEXT_PUBLIC_DOCKER_BUILD: process.env.NEXT_PUBLIC_DOCKER_BUILD,
+			NEXT_PUBLIC_UI_LANGUAGE: process.env.NEXT_PUBLIC_UI_LANGUAGE,
 		},
 	});
 

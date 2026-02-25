@@ -44,6 +44,7 @@ import { createNotification } from "@/lib/Notification";
 import * as EffectRuntime from "@/lib/server";
 import { runPromise } from "@/lib/server";
 import { transcribeVideo } from "@/lib/transcribe";
+import { t } from "@/lib/translations";
 import { optionFromTOrFirst } from "@/utils/effect";
 import { isAiGenerationEnabled } from "@/utils/flags";
 import { PasswordOverlay } from "./_components/PasswordOverlay";
@@ -117,28 +118,49 @@ const ALLOWED_REFERRERS = [
 	"linkedin.com",
 ];
 
-function PolicyDeniedView({ reason }: { reason?: string }) {
-	let title = "This video is private";
-	let description = (
+function TranslatedLink({
+	translationKey,
+	linkText,
+	href,
+}: {
+	translationKey:
+		| "share.signInToManageDescription"
+		| "share.emailRestrictionDescription";
+	linkText: string;
+	href: string;
+}) {
+	const parts = t(translationKey).split("{link}");
+	return (
 		<>
-			If you own this video, please <Link href="/login">sign in</Link> to manage
-			sharing.
+			{parts[0]}
+			<Link href={href}>{linkText}</Link>
+			{parts[1] || ""}
 		</>
+	);
+}
+
+function PolicyDeniedView({ reason }: { reason?: string }) {
+	let title = t("share.videoPrivate");
+	let description: React.ReactNode = (
+		<TranslatedLink
+			translationKey="share.signInToManageDescription"
+			linkText={t("share.signInToManage")}
+			href="/login"
+		/>
 	);
 
 	if (reason === "email_restriction_login_required") {
-		title = "This video requires sign-in";
+		title = t("share.requiresSignIn");
 		description = (
-			<>
-				The owner of this video has restricted access. Please{" "}
-				<Link href="/login">sign in</Link> with an authorized email address to
-				view.
-			</>
+			<TranslatedLink
+				translationKey="share.emailRestrictionDescription"
+				linkText={t("share.signInToManage")}
+				href="/login"
+			/>
 		);
 	} else if (reason === "email_restriction_denied") {
-		title = "Access restricted";
-		description =
-			"Your email address does not meet the requirements set by the video owner.";
+		title = t("share.accessRestricted");
+		description = t("share.emailDeniedDescription");
 	}
 
 	return (
@@ -184,8 +206,8 @@ export async function generateMetadata(
 			Option.match({
 				onNone: () => notFound(),
 				onSome: ([video]) => ({
-					title: `${video.name} | oaris`,
-					description: "Watch this video on oaris",
+					title: `${video.name} | ${t("meta.titleSuffix")}`,
+					description: t("meta.watchDescription"),
 					alternates: {
 						types: {
 							"application/json+oembed": oembedUrl,
@@ -216,8 +238,8 @@ export async function generateMetadata(
 					},
 					twitter: {
 						card: "player",
-						title: `${video.name} | oaris`,
-						description: "Watch this video on oaris",
+						title: `${video.name} | ${t("meta.titleSuffix")}`,
+						description: t("meta.watchDescription"),
 						images: [
 							new URL(
 								`/api/video/og?videoId=${videoId}`,
@@ -713,7 +735,7 @@ async function AuthorizedContent({
 						rel="noopener"
 						className="flex justify-center items-center px-4 py-2 mx-auto space-x-2 bg-white rounded-full border border-gray-5 w-fit"
 					>
-						<span className="text-sm">Recorded with</span>
+						<span className="text-sm">{t("share.recordedWith")}</span>
 						<Logo className="w-14 h-auto" />
 					</a>
 					<div className="flex items-center gap-3 text-xs text-gray-9">

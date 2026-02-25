@@ -8,6 +8,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { verifyVideoPassword } from "@/actions/videos/password";
 import { OarisLogo } from "@/components/OarisLogo";
+import { t } from "@/lib/translations";
 
 interface PasswordOverlayProps {
 	isOpen: boolean;
@@ -44,11 +45,10 @@ export const PasswordOverlay: React.FC<PasswordOverlayProps> = ({
 						<OarisLogo className="w-16 sm:w-20 md:w-24 h-auto text-gray-12" />
 						<div className="text-center space-y-2">
 							<h2 className="text-lg sm:text-xl font-semibold text-gray-12 font-league-spartan">
-								Protected Video
+								{t("password.title")}
 							</h2>
 							<p className="text-xs sm:text-sm text-gray-10 max-w-xs sm:max-w-sm px-2 sm:px-0">
-								This video is password protected. Please enter the password to
-								continue watching.
+								{t("password.description")}
 							</p>
 						</div>
 					</div>
@@ -59,14 +59,14 @@ export const PasswordOverlay: React.FC<PasswordOverlayProps> = ({
 								htmlFor="password"
 								className="text-sm font-medium text-gray-12"
 							>
-								Password
+								{t("password.label")}
 							</label>
 							<Input
 								id="password"
 								type="password"
 								value={password}
 								onChange={(e) => setPassword(e.target.value)}
-								placeholder="Enter password"
+								placeholder={t("password.placeholder")}
 								className="w-full"
 								autoFocus
 							/>
@@ -79,7 +79,9 @@ export const PasswordOverlay: React.FC<PasswordOverlayProps> = ({
 							disabled={verifyPassword.isPending || !password.trim()}
 							onClick={() => verifyPassword.mutate()}
 						>
-							{verifyPassword.isPending ? "Verifying..." : "Access Video"}
+							{verifyPassword.isPending
+								? t("password.verifying")
+								: t("password.submit")}
 						</Button>
 					</div>
 				</div>
