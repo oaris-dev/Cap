@@ -16,6 +16,7 @@ import {
 } from "@/lib/media-client";
 import { runPromise } from "@/lib/server";
 import { type DeepgramResult, formatToWebVTT } from "@/lib/transcribe-utils";
+import { transcribeWithVoxtral } from "@/lib/transcribe-voxtral";
 
 type TranscribeResult = {
 	success: boolean;
@@ -28,7 +29,7 @@ export async function transcribeVideo(
 	aiGenerationEnabled = false,
 	_isRetry = false,
 ): Promise<TranscribeResult> {
-	if (!serverEnv().DEEPGRAM_API_KEY) {
+	if (!serverEnv().MISTRAL_API_KEY && !serverEnv().DEEPGRAM_API_KEY) {
 		return {
 			success: false,
 			message: "Missing necessary environment variables",
@@ -221,31 +222,57 @@ async function transcribeVideoDirect(
 
 	const audioData = Buffer.from(await audioResponse.arrayBuffer());
 
-	const deepgramApiUrl = serverEnv().DEEPGRAM_API_URL;
-	const deepgramOptions = deepgramApiUrl
-		? { global: { url: deepgramApiUrl } }
-		: undefined;
-	const deepgram = createClient(
-		serverEnv().DEEPGRAM_API_KEY as string,
-		deepgramOptions,
-	);
+	let transcription: string | null = null;
 
-	const { result, error } = await deepgram.listen.prerecorded.transcribeFile(
-		audioData,
-		{
-			model: "nova-3",
-			smart_format: true,
-			detect_language: true,
-			utterances: true,
-			mime_type: "audio/mpeg",
-		},
-	);
-
-	if (error) {
-		throw new Error(`Deepgram transcription failed: ${error.message}`);
+	if (serverEnv().MISTRAL_API_KEY) {
+		console.log(
+			`[transcribeVideo] Attempting Voxtral transcription for ${videoId}`,
+		);
+		transcription = await transcribeWithVoxtral(audioData);
+		if (transcription) {
+			console.log(
+				`[transcribeVideo] Voxtral transcription succeeded for ${videoId}`,
+			);
+		} else {
+			console.warn(
+				`[transcribeVideo] Voxtral transcription failed for ${videoId}, trying Deepgram fallback`,
+			);
+		}
 	}
 
-	const transcription = formatToWebVTT(result as unknown as DeepgramResult);
+	if (!transcription) {
+		if (!serverEnv().DEEPGRAM_API_KEY) {
+			throw new Error(
+				"Voxtral transcription failed and no DEEPGRAM_API_KEY configured for fallback",
+			);
+		}
+
+		const deepgramApiUrl = serverEnv().DEEPGRAM_API_URL;
+		const deepgramOptions = deepgramApiUrl
+			? { global: { url: deepgramApiUrl } }
+			: undefined;
+		const deepgram = createClient(
+			serverEnv().DEEPGRAM_API_KEY as string,
+			deepgramOptions,
+		);
+
+		const { result, error } = await deepgram.listen.prerecorded.transcribeFile(
+			audioData,
+			{
+				model: "nova-3",
+				smart_format: true,
+				detect_language: true,
+				utterances: true,
+				mime_type: "audio/mpeg",
+			},
+		);
+
+		if (error) {
+			throw new Error(`Deepgram transcription failed: ${error.message}`);
+		}
+
+		transcription = formatToWebVTT(result as unknown as DeepgramResult);
+	}
 
 	await s3Bucket
 		.putObject(`${userId}/${videoId}/transcription.vtt`, transcription, {
