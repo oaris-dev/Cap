@@ -34,6 +34,15 @@ export async function middleware(request: NextRequest) {
 		return response;
 	}
 
+	if (
+		path.startsWith("/s/") &&
+		request.headers.get("sec-fetch-dest") === "iframe"
+	) {
+		const embedPath = path.replace(/^\/s\//, "/embed/");
+		const embedUrl = new URL(embedPath + url.search, url.origin);
+		return NextResponse.redirect(embedUrl, 302);
+	}
+
 	if (path.startsWith("/embed/")) {
 		const response = NextResponse.next();
 		response.headers.set("Access-Control-Allow-Origin", "*");
