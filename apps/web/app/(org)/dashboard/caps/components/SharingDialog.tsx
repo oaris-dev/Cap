@@ -27,6 +27,7 @@ import type { Spaces } from "@/app/(org)/dashboard/dashboard-data";
 import type { CurrentUser } from "@/app/Layout/AuthContext";
 import { SignedImageUrl } from "@/components/SignedImageUrl";
 import { Tooltip } from "@/components/Tooltip";
+import { type EmbedTokenExpiry, EXPIRY_LABELS } from "@/lib/embed-token";
 import { usePublicEnv } from "@/utils/public-env";
 
 interface SharingDialogProps {
@@ -606,15 +607,6 @@ function useEmbedCode(capId: Video.VideoId) {
 	);
 }
 
-type EmbedTokenExpiry = "1h" | "24h" | "7d" | "30d";
-
-const EXPIRY_LABELS: Record<EmbedTokenExpiry, string> = {
-	"1h": "1 hour",
-	"24h": "24 hours",
-	"7d": "7 days",
-	"30d": "30 days",
-};
-
 function EmbedTokenGenerator({ capId }: { capId: Video.VideoId }) {
 	const [expiry, setExpiry] = useState<EmbedTokenExpiry>("7d");
 	const [generatedUrl, setGeneratedUrl] = useState<string | null>(null);
@@ -657,7 +649,7 @@ function EmbedTokenGenerator({ capId }: { capId: Video.VideoId }) {
 
 	const handleCopyIframe = async () => {
 		if (!generatedUrl) return;
-		const iframe = `<div style="position: relative; padding-bottom: 56.25%; height: 0;"><iframe src="${generatedUrl}" frameborder="0" allowfullscreen style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></iframe></div>`;
+		const iframe = `<div style="position: relative; padding-bottom: 56.25%; height: 0;"><iframe src="${generatedUrl}" frameborder="0" webkitallowfullscreen mozallowfullscreen allowfullscreen style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></iframe></div>`;
 		try {
 			await navigator.clipboard.writeText(iframe);
 			toast.success("Embed code copied to clipboard");

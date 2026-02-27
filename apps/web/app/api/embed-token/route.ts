@@ -4,9 +4,11 @@ import { videos } from "@cap/database/schema";
 import { buildEnv } from "@cap/env";
 import { eq } from "drizzle-orm";
 import type { NextRequest } from "next/server";
-import { type EmbedTokenExpiry, signEmbedToken } from "@/lib/embed-token";
-
-const VALID_EXPIRIES: EmbedTokenExpiry[] = ["1h", "24h", "7d", "30d"];
+import {
+	type EmbedTokenExpiry,
+	signEmbedToken,
+	VALID_EXPIRIES,
+} from "@/lib/embed-token";
 
 export async function POST(request: NextRequest) {
 	const user = await getCurrentUser();
@@ -48,7 +50,7 @@ export async function POST(request: NextRequest) {
 	}
 
 	if (video.ownerId !== user.id) {
-		return Response.json({ error: "Unauthorized" }, { status: 403 });
+		return Response.json({ error: "Forbidden" }, { status: 403 });
 	}
 
 	if (!video.password) {

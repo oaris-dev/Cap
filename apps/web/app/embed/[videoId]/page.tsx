@@ -176,7 +176,7 @@ export default async function EmbedVideoPage(
 	const autoplay = searchParams.autoplay === "true";
 	const token = searchParams.token;
 
-	if (typeof token === "string" && token.length > 0) {
+	if (typeof token === "string" && token.length > 0 && token.length < 2048) {
 		const result = await verifyEmbedToken(token, videoId);
 		if (result.valid) {
 			const video = await fetchVideoByIdDirect(videoId);
