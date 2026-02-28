@@ -8,6 +8,7 @@ import type { Video } from "@cap/web-domain";
 import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
+import { signEmbedToken } from "@/lib/embed-token";
 
 export async function setVideoPassword(
 	videoId: Video.VideoId,
@@ -103,6 +104,34 @@ export async function verifyVideoPassword(
 		return { success: true, value: "Password verified" };
 	} catch (error) {
 		console.error("Error verifying video password:", error);
+		return { success: false, error: "Failed to verify password" };
+	}
+}
+
+export async function verifyVideoPasswordForEmbed(
+	videoId: Video.VideoId,
+	password: string,
+) {
+	try {
+		if (!videoId || typeof password !== "string")
+			throw new Error("Missing data");
+
+		const [video] = await db()
+			.select()
+			.from(videos)
+			.where(eq(videos.id, videoId));
+
+		if (!video || !video.password) throw new Error("No password set");
+
+		const valid = await verifyPassword(video.password, password);
+
+		if (!valid) throw new Error("Invalid password");
+
+		const token = await signEmbedToken(videoId, "24h");
+
+		return { success: true, token };
+	} catch (error) {
+		console.error("Error verifying video password for embed:", error);
 		return { success: false, error: "Failed to verify password" };
 	}
 }
