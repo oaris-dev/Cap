@@ -190,3 +190,31 @@ export const apiToHandler = (
 		HttpApiBuilder.toWebHandler,
 		(v) => (req: Request) => v.handler(req),
 	);
+
+export const apiToHandlerWithPassword = (
+	api: Layer.Layer<
+		HttpApi.Api,
+		never,
+		Layer.Layer.Success<typeof Dependencies> | HttpAuthMiddleware
+	>,
+	password: string,
+) =>
+	api.pipe(
+		HttpMiddleware.withSpanNameGenerator((req) => `${req.method} ${req.url}`),
+		Layer.provideMerge(HttpAuthMiddlewareLive),
+		Layer.merge(HttpServer.layerContext),
+		Layer.provide(cors),
+		Layer.provide(
+			HttpApiBuilder.middleware(
+				Effect.provide(
+					Layer.succeed(Video.VideoPasswordAttachment, {
+						password: Option.some(password),
+					}),
+				),
+			),
+		),
+		Layer.provide(layerTracer),
+		Layer.provideMerge(Dependencies),
+		HttpApiBuilder.toWebHandler,
+		(v) => (req: Request) => v.handler(req),
+	);
