@@ -117,11 +117,11 @@ export async function verifyVideoPasswordForEmbed(
 			throw new Error("Missing data");
 
 		const [video] = await db()
-			.select()
+			.select({ password: videos.password })
 			.from(videos)
 			.where(eq(videos.id, videoId));
 
-		if (!video || !video.password) throw new Error("No password set");
+		if (!video?.password) throw new Error("No password set");
 
 		const valid = await verifyPassword(video.password, password);
 

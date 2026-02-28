@@ -134,8 +134,6 @@ export const EmbedVideo = forwardRef<
 				data.source.type === "MediaConvert")
 		) {
 			videoSrc = `/api/playlist?userId=${data.ownerId}&videoId=${data.id}&videoType=master${tokenParam}`;
-		} else if (data.source.type === "MediaConvert") {
-			videoSrc = `/api/playlist?userId=${data.ownerId}&videoId=${data.id}&videoType=video${tokenParam}`;
 		} else {
 			videoSrc = `/api/playlist?userId=${data.ownerId}&videoId=${data.id}&videoType=video${tokenParam}`;
 		}
