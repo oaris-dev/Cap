@@ -246,5 +246,26 @@ const getPlaylistResponse = (
 
 const handler = apiToHandler(ApiLive);
 
-export const GET = (r: Request) => handler(r);
-export const HEAD = (r: Request) => handler(r);
+const CORS_HEADERS = {
+	"Access-Control-Allow-Origin": "*",
+	"Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+	"Access-Control-Allow-Headers": "Range, Content-Type",
+} as const;
+
+async function withCors(r: Request) {
+	const response = await handler(r);
+	const corsResponse = new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers: new Headers(response.headers),
+	});
+	for (const [key, value] of Object.entries(CORS_HEADERS)) {
+		corsResponse.headers.set(key, value);
+	}
+	return corsResponse;
+}
+
+export const GET = (r: Request) => withCors(r);
+export const HEAD = (r: Request) => withCors(r);
+export const OPTIONS = () =>
+	new Response(null, { status: 204, headers: CORS_HEADERS });

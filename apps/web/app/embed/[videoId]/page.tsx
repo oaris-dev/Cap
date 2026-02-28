@@ -17,6 +17,7 @@ import { Effect, Option } from "effect";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { verifyEmbedToken } from "@/lib/embed-token";
 import * as EffectRuntime from "@/lib/server";
 import { transcribeVideo } from "@/lib/transcribe";
 import { isAiGenerationEnabled } from "@/utils/flags";
@@ -120,6 +121,52 @@ export async function generateMetadata(
 	);
 }
 
+const videoSelectFields = {
+	id: videos.id,
+	name: videos.name,
+	ownerId: videos.ownerId,
+	orgId: videos.orgId,
+	settings: videos.settings,
+	createdAt: videos.createdAt,
+	effectiveCreatedAt: videos.effectiveCreatedAt,
+	updatedAt: videos.updatedAt,
+	bucket: videos.bucket,
+	metadata: videos.metadata,
+	public: videos.public,
+	videoStartTime: videos.videoStartTime,
+	audioStartTime: videos.audioStartTime,
+	awsRegion: videos.awsRegion,
+	awsBucket: videos.awsBucket,
+	xStreamInfo: videos.xStreamInfo,
+	jobId: videos.jobId,
+	jobStatus: videos.jobStatus,
+	isScreenshot: videos.isScreenshot,
+	skipProcessing: videos.skipProcessing,
+	transcriptionStatus: videos.transcriptionStatus,
+	source: videos.source,
+	folderId: videos.folderId,
+	width: videos.width,
+	height: videos.height,
+	duration: videos.duration,
+	fps: videos.fps,
+	hasPassword: sql`${videos.password} IS NOT NULL`.mapWith(Boolean),
+	sharedOrganization: {
+		organizationId: sharedVideos.organizationId,
+	},
+	hasActiveUpload: sql`${videoUploads.videoId} IS NOT NULL`.mapWith(Boolean),
+};
+
+async function fetchVideoByIdDirect(videoId: Video.VideoId) {
+	const [video] = await db()
+		.select(videoSelectFields)
+		.from(videos)
+		.leftJoin(sharedVideos, eq(videos.id, sharedVideos.videoId))
+		.leftJoin(videoUploads, eq(videos.id, videoUploads.videoId))
+		.leftJoin(organizations, eq(videos.orgId, organizations.id))
+		.where(and(eq(videos.id, videoId), isNull(organizations.tombstoneAt)));
+	return video ?? null;
+}
+
 export default async function EmbedVideoPage(
 	props: PageProps<"/embed/[videoId]">,
 ) {
@@ -127,48 +174,27 @@ export default async function EmbedVideoPage(
 	const searchParams = await props.searchParams;
 	const videoId = params.videoId as Video.VideoId;
 	const autoplay = searchParams.autoplay === "true";
+	const token = searchParams.token;
+
+	if (typeof token === "string" && token.length > 0 && token.length < 2048) {
+		const result = await verifyEmbedToken(token, videoId);
+		if (result.valid) {
+			const video = await fetchVideoByIdDirect(videoId);
+			if (!video) return notFound();
+			return (
+				<div className="min-h-screen bg-black font-lexend">
+					<EmbedContent video={video} autoplay={autoplay} />
+				</div>
+			);
+		}
+	}
 
 	return Effect.gen(function* () {
 		const videosPolicy = yield* VideosPolicy;
 
 		const [video] = yield* Effect.promise(() =>
 			db()
-				.select({
-					id: videos.id,
-					name: videos.name,
-					ownerId: videos.ownerId,
-					orgId: videos.orgId,
-					settings: videos.settings,
-					createdAt: videos.createdAt,
-					effectiveCreatedAt: videos.effectiveCreatedAt,
-					updatedAt: videos.updatedAt,
-					bucket: videos.bucket,
-					metadata: videos.metadata,
-					public: videos.public,
-					videoStartTime: videos.videoStartTime,
-					audioStartTime: videos.audioStartTime,
-					awsRegion: videos.awsRegion,
-					awsBucket: videos.awsBucket,
-					xStreamInfo: videos.xStreamInfo,
-					jobId: videos.jobId,
-					jobStatus: videos.jobStatus,
-					isScreenshot: videos.isScreenshot,
-					skipProcessing: videos.skipProcessing,
-					transcriptionStatus: videos.transcriptionStatus,
-					source: videos.source,
-					folderId: videos.folderId,
-					width: videos.width,
-					height: videos.height,
-					duration: videos.duration,
-					fps: videos.fps,
-					hasPassword: sql`${videos.password} IS NOT NULL`.mapWith(Boolean),
-					sharedOrganization: {
-						organizationId: sharedVideos.organizationId,
-					},
-					hasActiveUpload: sql`${videoUploads.videoId} IS NOT NULL`.mapWith(
-						Boolean,
-					),
-				})
+				.select(videoSelectFields)
 				.from(videos)
 				.leftJoin(sharedVideos, eq(videos.id, sharedVideos.videoId))
 				.leftJoin(videoUploads, eq(videos.id, videoUploads.videoId))
