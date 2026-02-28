@@ -4,10 +4,15 @@ const en = {
 	"password.title": "Protected Video",
 	"password.description":
 		"This video is password protected. Please enter the password to continue watching.",
+	"password.sandboxDescription":
+		"This video requires a password. Copy the link and open it in your browser to enter the password.",
 	"password.label": "Password",
 	"password.placeholder": "Enter password",
 	"password.verifying": "Verifying...",
 	"password.submit": "Access Video",
+	"password.openInBrowser": "Open in Browser",
+	"password.copy": "Copy",
+	"password.copied": "Copied!",
 
 	"auth.back": "Back",
 	"auth.signInTitle": "Sign in to comment",
@@ -121,10 +126,15 @@ const de: Record<keyof typeof en, string> = {
 	"password.title": "Geschütztes Video",
 	"password.description":
 		"Dieses Video ist passwortgeschützt. Bitte geben Sie das Passwort ein, um fortzufahren.",
+	"password.sandboxDescription":
+		"Dieses Video erfordert ein Passwort. Kopieren Sie den Link und öffnen Sie ihn in Ihrem Browser, um das Passwort einzugeben.",
 	"password.label": "Passwort",
 	"password.placeholder": "Passwort eingeben",
 	"password.verifying": "Wird überprüft...",
 	"password.submit": "Video ansehen",
+	"password.openInBrowser": "Im Browser öffnen",
+	"password.copy": "Kopieren",
+	"password.copied": "Kopiert!",
 
 	"auth.back": "Zurück",
 	"auth.signInTitle": "Anmelden zum Kommentieren",

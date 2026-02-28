@@ -27,6 +27,7 @@ import type { Spaces } from "@/app/(org)/dashboard/dashboard-data";
 import type { CurrentUser } from "@/app/Layout/AuthContext";
 import { SignedImageUrl } from "@/components/SignedImageUrl";
 import { Tooltip } from "@/components/Tooltip";
+import { type EmbedTokenExpiry, EXPIRY_LABELS } from "@/lib/embed-token-shared";
 import { usePublicEnv } from "@/utils/public-env";
 
 interface SharingDialogProps {
@@ -464,6 +465,7 @@ export const SharingDialog: React.FC<SharingDialogProps> = ({
 								<FontAwesomeIcon icon={faCopy} className="size-3.5 mr-1" />
 								Copy embed code
 							</Button>
+							{passwordEnabled && <EmbedTokenGenerator capId={capId} />}
 						</div>
 					)}
 				</div>
@@ -602,5 +604,129 @@ function useEmbedCode(capId: Video.VideoId) {
 				.replace(/>\s+</g, "><")
 				.replace(/"\s+>/g, '">'),
 		[publicEnv.webUrl, capId],
+	);
+}
+
+function EmbedTokenGenerator({ capId }: { capId: Video.VideoId }) {
+	const [expiry, setExpiry] = useState<EmbedTokenExpiry>("7d");
+	const [generatedUrl, setGeneratedUrl] = useState<string | null>(null);
+
+	const generateToken = useMutation({
+		mutationFn: async () => {
+			const res = await fetch("/api/embed-token", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ videoId: capId, expiresIn: expiry }),
+			});
+			if (!res.ok) {
+				const data = await res.json();
+				throw new Error(data.error ?? "Failed to generate token");
+			}
+			return res.json() as Promise<{
+				url: string;
+				token: string;
+				expiresIn: string;
+			}>;
+		},
+		onSuccess: (data) => {
+			setGeneratedUrl(data.url);
+			toast.success("Embed link generated");
+		},
+		onError: (e) => {
+			toast.error(e.message);
+		},
+	});
+
+	const handleCopyUrl = async () => {
+		if (!generatedUrl) return;
+		try {
+			await navigator.clipboard.writeText(generatedUrl);
+			toast.success("Embed link copied to clipboard");
+		} catch {
+			toast.error("Failed to copy");
+		}
+	};
+
+	const handleCopyIframe = async () => {
+		if (!generatedUrl) return;
+		const iframe = `<div style="position: relative; padding-bottom: 56.25%; height: 0;"><iframe src="${generatedUrl}" frameborder="0" webkitallowfullscreen mozallowfullscreen allowfullscreen style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></iframe></div>`;
+		try {
+			await navigator.clipboard.writeText(iframe);
+			toast.success("Embed code copied to clipboard");
+		} catch {
+			toast.error("Failed to copy");
+		}
+	};
+
+	return (
+		<div className="pt-3 mt-3 space-y-3 border-t border-gray-4">
+			<div>
+				<p className="text-sm font-medium text-gray-12">
+					Password-safe embed link
+				</p>
+				<p className="text-xs text-gray-10">
+					Generate a link that bypasses the password for embedding in sandboxed
+					environments (whiteboards, wikis, etc.)
+				</p>
+			</div>
+			<div className="flex gap-2 items-center">
+				<select
+					className="flex-1 px-3 py-1.5 text-sm rounded-lg border bg-gray-2 border-gray-4 text-gray-12"
+					value={expiry}
+					onChange={(e) => {
+						setExpiry(e.target.value as EmbedTokenExpiry);
+						setGeneratedUrl(null);
+					}}
+				>
+					{(Object.keys(EXPIRY_LABELS) as EmbedTokenExpiry[]).map((key) => (
+						<option key={key} value={key}>
+							Expires in {EXPIRY_LABELS[key]}
+						</option>
+					))}
+				</select>
+				<Button
+					size="sm"
+					variant="dark"
+					spinner={generateToken.isPending}
+					disabled={generateToken.isPending}
+					onClick={() => generateToken.mutate()}
+				>
+					Generate
+				</Button>
+			</div>
+			{generatedUrl && (
+				<div className="space-y-2">
+					<div className="p-2 rounded-lg border bg-gray-3 border-gray-4">
+						<code className="font-mono text-xs break-all text-gray-11">
+							{generatedUrl}
+						</code>
+					</div>
+					<div className="flex gap-2">
+						<Button
+							size="sm"
+							variant="gray"
+							className="flex-1"
+							onClick={handleCopyUrl}
+						>
+							<FontAwesomeIcon icon={faCopy} className="size-3 mr-1" />
+							Copy link
+						</Button>
+						<Button
+							size="sm"
+							variant="gray"
+							className="flex-1"
+							onClick={handleCopyIframe}
+						>
+							<FontAwesomeIcon icon={faCopy} className="size-3 mr-1" />
+							Copy iframe
+						</Button>
+					</div>
+					<p className="text-xs text-gray-9">
+						This link grants access without requiring the password. It expires
+						in {EXPIRY_LABELS[expiry]}.
+					</p>
+				</div>
+			)}
+		</div>
 	);
 }
