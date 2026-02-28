@@ -80,6 +80,12 @@ function createServerEnv() {
 				.string()
 				.optional()
 				.describe("Comma-separated list of permitted signup domains"),
+			ALLOWED_EMBED_ORIGINS: z
+				.string()
+				.optional()
+				.describe(
+					"Comma-separated list of origins allowed to embed password-protected videos without authentication (e.g. 'affine.oaris.de,affine.echo.oaris.de')",
+				),
 
 			/// AI providers
 			DEEPGRAM_API_KEY: z.string().optional().describe("Audio transcription"),

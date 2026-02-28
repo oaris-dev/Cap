@@ -1,9 +1,12 @@
 import { db } from "@cap/database";
-import { organizations } from "@cap/database/schema";
+import { encrypt } from "@cap/database/crypto";
+import { organizations, videos } from "@cap/database/schema";
 import { buildEnv, serverEnv } from "@cap/env";
+import type { Video } from "@cap/web-domain";
 import { eq } from "drizzle-orm";
 import { notFound } from "next/navigation";
 import { type NextRequest, NextResponse, userAgent } from "next/server";
+import { verifyEmbedToken } from "@/lib/embed-token";
 
 const addHttps = (s?: string) => {
 	if (!s) return s;
@@ -20,6 +23,27 @@ const mainOrigins = [
 	addHttps(serverEnv().VERCEL_PROJECT_PRODUCTION_URL_HOST),
 ].filter(Boolean) as string[];
 
+function isFromAllowedEmbedOrigin(request: NextRequest): boolean {
+	const raw = serverEnv().ALLOWED_EMBED_ORIGINS;
+	if (!raw) return false;
+
+	const allowed = raw
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+	if (allowed.length === 0) return false;
+
+	const referer = request.headers.get("referer");
+	if (!referer) return false;
+
+	try {
+		const refererHost = new URL(referer).hostname;
+		return allowed.some((origin) => refererHost === origin);
+	} catch {
+		return false;
+	}
+}
+
 export async function middleware(request: NextRequest) {
 	const url = new URL(request.url);
 	const path = url.pathname;
@@ -34,11 +58,72 @@ export async function middleware(request: NextRequest) {
 		return response;
 	}
 
+	if (
+		path.startsWith("/s/") &&
+		request.headers.get("sec-fetch-dest") === "iframe"
+	) {
+		const embedPath = path.replace(/^\/s\//, "/embed/");
+		const embedUrl = new URL(embedPath + url.search, url.origin);
+		return NextResponse.redirect(embedUrl, 302);
+	}
+
 	if (path.startsWith("/embed/")) {
-		const response = NextResponse.next();
+		const videoIdMatch = path.match(/^\/embed\/([^/]+)/);
+		const videoId = videoIdMatch?.[1];
+		let encryptedPassword: string | null = null;
+
+		if (videoId) {
+			let authenticated = false;
+
+			const token = url.searchParams.get("token");
+			if (token && token.length > 0 && token.length < 2048) {
+				try {
+					const result = await verifyEmbedToken(token, videoId);
+					authenticated = result.valid;
+				} catch (e) {
+					console.error("Embed token verification failed:", e);
+				}
+			}
+
+			if (!authenticated) {
+				authenticated = isFromAllowedEmbedOrigin(request);
+			}
+
+			if (authenticated) {
+				try {
+					const [video] = await db()
+						.select({ password: videos.password })
+						.from(videos)
+						.where(eq(videos.id, videoId as Video.VideoId));
+					if (video?.password) {
+						encryptedPassword = await encrypt(video.password);
+					}
+				} catch (e) {
+					console.error("Embed password lookup failed:", e);
+				}
+			}
+		}
+
+		if (encryptedPassword) {
+			request.cookies.set("x-cap-password", encryptedPassword);
+		}
+
+		const response = NextResponse.next({
+			request: { headers: request.headers },
+		});
 		response.headers.set("Access-Control-Allow-Origin", "*");
 		response.headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
 		response.headers.delete("X-Frame-Options");
+
+		if (encryptedPassword) {
+			response.cookies.set("x-cap-password", encryptedPassword, {
+				httpOnly: true,
+				secure: process.env.NODE_ENV === "production",
+				sameSite: "lax",
+				path: "/",
+			});
+		}
+
 		return response;
 	}
 
