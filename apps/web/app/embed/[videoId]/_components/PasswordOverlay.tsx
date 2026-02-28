@@ -3,10 +3,9 @@
 import { Button, Dialog, DialogContent, Input } from "@cap/ui";
 import type { Video } from "@cap/web-domain";
 import { useMutation } from "@tanstack/react-query";
-import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { verifyVideoPassword } from "@/actions/videos/password";
+import { verifyVideoPasswordForEmbed } from "@/actions/videos/password";
 import { OarisLogo } from "@/components/OarisLogo";
 import { t } from "@/lib/translations";
 
@@ -88,22 +87,19 @@ export const PasswordOverlay: React.FC<PasswordOverlayProps> = ({
 	videoId,
 }) => {
 	const [password, setPassword] = useState("");
-	const router = useRouter();
 	const isSandboxed = useIsSandboxed();
 
 	const verifyPassword = useMutation({
 		mutationFn: () =>
-			verifyVideoPassword(videoId, password).then((v) => {
-				if (v.success) return v.value;
+			verifyVideoPasswordForEmbed(videoId, password).then((v) => {
+				if (v.success && v.token) return v.token;
 				throw new Error(v.error);
 			}),
-		onSuccess: (result) => {
-			toast.success(result);
-			try {
-				router.refresh();
-			} catch (_) {
-				window.location.reload();
-			}
+		onSuccess: (token) => {
+			toast.success("Password verified");
+			const url = new URL(window.location.href);
+			url.searchParams.set("token", token);
+			window.location.replace(url.toString());
 		},
 		onError: (e) => {
 			toast.error(e.message);
