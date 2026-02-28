@@ -1,4 +1,6 @@
+import { db } from "@cap/database";
 import * as Db from "@cap/database/schema";
+import { videos as videosTable } from "@cap/database/schema";
 import { serverEnv } from "@cap/env";
 import {
 	Database,
@@ -17,7 +19,8 @@ import {
 } from "@effect/platform";
 import { eq } from "drizzle-orm";
 import { Effect, Layer, Option, Schema } from "effect";
-import { apiToHandler } from "@/lib/server";
+import { verifyEmbedToken } from "@/lib/embed-token";
+import { apiToHandler, apiToHandlerWithPassword } from "@/lib/server";
 import { CACHE_CONTROL_HEADERS } from "@/utils/helpers";
 import {
 	generateM3U8Playlist,
@@ -31,6 +34,7 @@ const GetPlaylistParams = Schema.Struct({
 	videoType: Schema.Literal("video", "audio", "master", "mp4", "raw-preview"),
 	thumbnail: Schema.OptionFromUndefinedOr(Schema.String),
 	fileType: Schema.OptionFromUndefinedOr(Schema.String),
+	token: Schema.OptionFromUndefinedOr(Schema.String),
 });
 
 class Api extends HttpApi.make("CapWebApi").add(
@@ -209,12 +213,15 @@ const getPlaylistResponse = (
 						? yield* s3.headObject(audioSegment.Contents?.[0]?.Key ?? "")
 						: undefined;
 
+				const tokenSuffix = Option.isSome(urlParams.token)
+					? `&token=${encodeURIComponent(urlParams.token.value)}`
+					: "";
 				const generatedPlaylist = generateMasterPlaylist(
 					videoMetadata?.Metadata?.resolution ?? "",
 					videoMetadata?.Metadata?.bandwidth ?? "",
-					`${serverEnv().WEB_URL}/api/playlist?videoId=${video.id}&videoType=video`,
+					`${serverEnv().WEB_URL}/api/playlist?videoId=${video.id}&videoType=video${tokenSuffix}`,
 					audioMetadata
-						? `${serverEnv().WEB_URL}/api/playlist?videoId=${video.id}&videoType=audio`
+						? `${serverEnv().WEB_URL}/api/playlist?videoId=${video.id}&videoType=audio${tokenSuffix}`
 						: null,
 				);
 
@@ -273,8 +280,7 @@ const CORS_HEADERS = {
 	"Access-Control-Allow-Headers": "Range, Content-Type",
 } as const;
 
-async function withCors(r: Request) {
-	const response = await handler(r);
+function addCorsHeaders(response: Response): Response {
 	const corsResponse = new Response(response.body, {
 		status: response.status,
 		statusText: response.statusText,
@@ -284,6 +290,35 @@ async function withCors(r: Request) {
 		corsResponse.headers.set(key, value);
 	}
 	return corsResponse;
+}
+
+async function resolveTokenPassword(r: Request): Promise<string | null> {
+	const url = new URL(r.url);
+	const token = url.searchParams.get("token");
+	const videoId = url.searchParams.get("videoId");
+	if (!token || !videoId) return null;
+
+	const result = await verifyEmbedToken(token, videoId);
+	if (!result.valid) return null;
+
+	const [video] = await db()
+		.select({ password: videosTable.password })
+		.from(videosTable)
+		.where(eq(videosTable.id, videoId as Video.VideoId))
+		.limit(1);
+
+	return video?.password ?? null;
+}
+
+async function withCors(r: Request) {
+	const tokenPassword = await resolveTokenPassword(r);
+
+	if (tokenPassword) {
+		const tokenHandler = apiToHandlerWithPassword(ApiLive, tokenPassword);
+		return addCorsHeaders(await tokenHandler(r));
+	}
+
+	return addCorsHeaders(await handler(r));
 }
 
 export const GET = (r: Request) => withCors(r);

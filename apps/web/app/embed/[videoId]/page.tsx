@@ -183,7 +183,7 @@ export default async function EmbedVideoPage(
 			if (!video) return notFound();
 			return (
 				<div className="min-h-screen bg-black font-lexend">
-					<EmbedContent video={video} autoplay={autoplay} />
+					<EmbedContent video={video} autoplay={autoplay} embedToken={token} />
 				</div>
 			);
 		}
@@ -279,12 +279,14 @@ export default async function EmbedVideoPage(
 async function EmbedContent({
 	video,
 	autoplay,
+	embedToken,
 }: {
 	video: Omit<typeof videos.$inferSelect, "password"> & {
 		sharedOrganization: { organizationId: Organisation.OrganisationId } | null;
 		hasActiveUpload: boolean | undefined;
 	};
 	autoplay: boolean;
+	embedToken?: string;
 }) {
 	const user = await getCurrentUser();
 
@@ -370,6 +372,7 @@ async function EmbedContent({
 			ownerName={videoOwner[0]?.name || null}
 			autoplay={autoplay}
 			showPlaybackStatusBadge={user?.id === video.ownerId}
+			embedToken={embedToken}
 		/>
 	);
 }
