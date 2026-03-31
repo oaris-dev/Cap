@@ -144,6 +144,7 @@ export async function proxy(request: NextRequest) {
 				path.startsWith("/self-hosting") ||
 				path.startsWith("/terms") ||
 				path.startsWith("/verify-otp") ||
+				path.startsWith("/.well-known/") ||
 				path.startsWith("/.well-known/")
 			) &&
 			process.env.NODE_ENV !== "development"
