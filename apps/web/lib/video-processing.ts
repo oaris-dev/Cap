@@ -127,8 +127,15 @@ export async function startVideoProcessingWorkflow({
 				bucketId: bucketId as S3Bucket.S3BucketId | null,
 			},
 		]);
+		console.log(
+			`[video-processing] Workflow started for video ${videoId}`,
+		);
 		return "started";
 	} catch (error) {
+		console.error(
+			`[video-processing] Failed to start workflow for video ${videoId}:`,
+			error,
+		);
 		const normalizedError =
 			error instanceof Error
 				? error
