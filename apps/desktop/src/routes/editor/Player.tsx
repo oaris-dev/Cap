@@ -3,6 +3,7 @@ import { ToggleButton as KToggleButton } from "@kobalte/core/toggle-button";
 import { createElementBounds } from "@solid-primitives/bounds";
 import { debounce } from "@solid-primitives/scheduled";
 import { Menu } from "@tauri-apps/api/menu";
+import { type as ostype } from "@tauri-apps/plugin-os";
 import { cx } from "cva";
 import { createEffect, createSignal, onMount, Show } from "solid-js";
 
@@ -10,6 +11,7 @@ import Tooltip from "~/components/Tooltip";
 import { captionsStore } from "~/store/captions";
 import { commands } from "~/utils/tauri";
 import AspectRatioSelect from "./AspectRatioSelect";
+import { createCaptionTrackSegments } from "./captions";
 import {
 	type EditorPreviewQuality,
 	FPS,
@@ -52,24 +54,25 @@ export function PlayerContent() {
 		{ label: "Quarter", value: "quarter" as EditorPreviewQuality },
 	];
 
+	const zoomHint = () =>
+		ostype() === "windows"
+			? "Hold Ctrl and scroll, or press Ctrl +/- to zoom"
+			: "Pinch, or press Cmd +/- to zoom";
+
 	// Load captions on mount
 	onMount(async () => {
 		if (editorInstance?.path) {
-			// Still load captions into the store since they will be used by the GPU renderer
 			await captionsStore.loadCaptions(editorInstance.path);
 
-			// Synchronize captions settings with project configuration
-			// This ensures the GPU renderer will receive the caption settings
 			if (editorInstance && project) {
 				const updatedProject = { ...project };
+				let projectDidChange = false;
+				const captionSegments = captionsStore.state.segments;
+				const hasStoredCaptions = captionSegments.length > 0;
 
-				// Add captions data to project configuration if it doesn't exist
-				if (
-					!updatedProject.captions &&
-					captionsStore.state.segments.length > 0
-				) {
+				if (!updatedProject.captions && hasStoredCaptions) {
 					updatedProject.captions = {
-						segments: captionsStore.state.segments.map((segment) => ({
+						segments: captionSegments.map((segment) => ({
 							id: segment.id,
 							start: segment.start,
 							end: segment.end,
@@ -77,11 +80,47 @@ export function PlayerContent() {
 						})),
 						settings: { ...captionsStore.state.settings },
 					};
+					projectDidChange = true;
+				}
 
-					// Update the project with captions data
+				if (
+					hasStoredCaptions &&
+					(updatedProject.timeline?.captionSegments?.length ?? 0) === 0
+				) {
+					updatedProject.timeline = {
+						...(updatedProject.timeline ?? {
+							segments: [
+								{
+									start: 0,
+									end: editorInstance.recordingDuration,
+									timescale: 1,
+								},
+							],
+							zoomSegments: [],
+							sceneSegments: [],
+							maskSegments: [],
+							textSegments: [],
+						}),
+						captionSegments: createCaptionTrackSegments(captionSegments),
+					};
+					projectDidChange = true;
+				}
+
+				const hasCaptionTrackData =
+					hasStoredCaptions ||
+					(updatedProject.timeline?.captionSegments?.length ?? 0) > 0;
+
+				if (hasCaptionTrackData) {
+					setEditorState(
+						"timeline",
+						"tracks",
+						"caption",
+						updatedProject.captions?.settings?.enabled ?? true,
+					);
+				}
+
+				if (projectDidChange) {
 					setProject(updatedProject);
-
-					// Save the updated project configuration
 					await commands.setProjectConfig(
 						serializeProjectConfiguration(updatedProject),
 					);
@@ -306,7 +345,7 @@ export function PlayerContent() {
 				</div>
 			</div>
 			<PreviewCanvas />
-			<div class="flex overflow-hidden z-10 flex-row gap-3 justify-between items-center p-5">
+			<div class="relative flex overflow-hidden z-10 flex-row gap-3 justify-between items-center p-5">
 				<div class="flex-1">
 					<Time
 						class="text-gray-12"
@@ -425,6 +464,9 @@ export function PlayerContent() {
 							)} seconds visible`
 						}
 					/>
+				</div>
+				<div class="absolute right-2 bottom-1 text-[11px] leading-none text-right text-gray-9 pointer-events-none whitespace-nowrap">
+					{zoomHint()}
 				</div>
 			</div>
 		</div>

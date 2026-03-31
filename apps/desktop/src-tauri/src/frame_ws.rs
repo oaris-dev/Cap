@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -26,45 +27,6 @@ fn pack_frame_data(
     data
 }
 
-fn pack_nv12_frame_ref(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    y_stride: u32,
-    frame_number: u32,
-    target_time_ns: u64,
-) -> Vec<u8> {
-    let metadata_size = 28;
-    let mut output = Vec::with_capacity(data.len() + metadata_size);
-    output.extend_from_slice(data);
-    output.extend_from_slice(&y_stride.to_le_bytes());
-    output.extend_from_slice(&height.to_le_bytes());
-    output.extend_from_slice(&width.to_le_bytes());
-    output.extend_from_slice(&frame_number.to_le_bytes());
-    output.extend_from_slice(&target_time_ns.to_le_bytes());
-    output.extend_from_slice(&NV12_FORMAT_MAGIC.to_le_bytes());
-    output
-}
-
-fn pack_frame_data_ref(
-    data: &[u8],
-    stride: u32,
-    height: u32,
-    width: u32,
-    frame_number: u32,
-    target_time_ns: u64,
-) -> Vec<u8> {
-    let metadata_size = 24;
-    let mut output = Vec::with_capacity(data.len() + metadata_size);
-    output.extend_from_slice(data);
-    output.extend_from_slice(&stride.to_le_bytes());
-    output.extend_from_slice(&height.to_le_bytes());
-    output.extend_from_slice(&width.to_le_bytes());
-    output.extend_from_slice(&frame_number.to_le_bytes());
-    output.extend_from_slice(&target_time_ns.to_le_bytes());
-    output
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WSFrameFormat {
     Rgba,
@@ -84,25 +46,33 @@ pub struct WSFrame {
     pub created_at: Instant,
 }
 
-fn pack_ws_frame_ref(frame: &WSFrame) -> Vec<u8> {
+fn pack_ws_frame(frame: &WSFrame) -> Vec<u8> {
+    let metadata_size = match frame.format {
+        WSFrameFormat::Nv12 => 28usize,
+        WSFrameFormat::Rgba => 24,
+    };
+    let mut buf = Vec::with_capacity(frame.data.len() + metadata_size);
+    buf.extend_from_slice(&frame.data);
+
     match frame.format {
-        WSFrameFormat::Nv12 => pack_nv12_frame_ref(
-            &frame.data,
-            frame.width,
-            frame.height,
-            frame.stride,
-            frame.frame_number,
-            frame.target_time_ns,
-        ),
-        WSFrameFormat::Rgba => pack_frame_data_ref(
-            &frame.data,
-            frame.stride,
-            frame.height,
-            frame.width,
-            frame.frame_number,
-            frame.target_time_ns,
-        ),
+        WSFrameFormat::Nv12 => {
+            buf.extend_from_slice(&frame.stride.to_le_bytes());
+            buf.extend_from_slice(&frame.height.to_le_bytes());
+            buf.extend_from_slice(&frame.width.to_le_bytes());
+            buf.extend_from_slice(&frame.frame_number.to_le_bytes());
+            buf.extend_from_slice(&frame.target_time_ns.to_le_bytes());
+            buf.extend_from_slice(&NV12_FORMAT_MAGIC.to_le_bytes());
+        }
+        WSFrameFormat::Rgba => {
+            buf.extend_from_slice(&frame.stride.to_le_bytes());
+            buf.extend_from_slice(&frame.height.to_le_bytes());
+            buf.extend_from_slice(&frame.width.to_le_bytes());
+            buf.extend_from_slice(&frame.frame_number.to_le_bytes());
+            buf.extend_from_slice(&frame.target_time_ns.to_le_bytes());
+        }
     }
+
+    buf
 }
 
 pub async fn create_watch_frame_ws(
@@ -137,7 +107,7 @@ pub async fn create_watch_frame_ws(
         {
             let packed = {
                 let borrowed = camera_rx.borrow();
-                borrowed.as_deref().map(pack_ws_frame_ref)
+                borrowed.as_deref().map(pack_ws_frame)
             };
             if let Some(packed) = packed
                 && let Err(e) = socket.send(Message::Binary(packed)).await
@@ -172,14 +142,17 @@ pub async fn create_watch_frame_ws(
                             WSFrameFormat::Rgba => "RGBA",
                         };
 
-                        let packed = pack_ws_frame_ref(frame);
+                        let packed = pack_ws_frame(frame);
                         let packed_len = packed.len();
 
                         match socket.send(Message::Binary(packed)).await {
                             Ok(()) => {
                                 TOTAL_BYTES_SENT.fetch_add(packed_len as u64, Ordering::Relaxed);
                                 TOTAL_FRAMES_SENT.fetch_add(1, Ordering::Relaxed);
-                                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                                let now_ms = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .map(|duration| duration.as_millis() as u64)
+                                    .unwrap_or_default();
                                 let last_log = LAST_LOG_TIME.load(Ordering::Relaxed);
                                 if now_ms - last_log > 2000 {
                                     LAST_LOG_TIME.store(now_ms, Ordering::Relaxed);
@@ -214,12 +187,24 @@ pub async fn create_watch_frame_ws(
         .route("/", get(ws_handler))
         .with_state(frame_rx);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tracing::info!("WebSocket server listening on port {}", port);
-
     let cancel_token = CancellationToken::new();
     let cancel_token_child = cancel_token.child_token();
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!("Failed to bind watch frame websocket listener: {err}");
+            return (0, cancel_token_child);
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(err) => {
+            tracing::error!("Failed to read watch frame websocket listener address: {err}");
+            return (0, cancel_token_child);
+        }
+    };
+    tracing::info!("WebSocket server listening on port {}", port);
+
     tokio::spawn(async move {
         let server = axum::serve(listener, router.into_make_service());
         tokio::select! {
@@ -314,12 +299,24 @@ pub async fn create_frame_ws(frame_tx: broadcast::Sender<WSFrame>) -> (u16, Canc
         .route("/", get(ws_handler))
         .with_state(frame_tx);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tracing::info!("WebSocket server listening on port {}", port);
-
     let cancel_token = CancellationToken::new();
     let cancel_token_child = cancel_token.child_token();
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!("Failed to bind frame websocket listener: {err}");
+            return (0, cancel_token_child);
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(err) => {
+            tracing::error!("Failed to read frame websocket listener address: {err}");
+            return (0, cancel_token_child);
+        }
+    };
+    tracing::info!("WebSocket server listening on port {}", port);
+
     tokio::spawn(async move {
         let server = axum::serve(listener, router.into_make_service());
         tokio::select! {

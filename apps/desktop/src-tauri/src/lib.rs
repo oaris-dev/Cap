@@ -136,6 +136,71 @@ impl CameraWindowCloseGate {
     }
 }
 
+pub struct AppExitState(AtomicBool);
+
+impl Default for AppExitState {
+    fn default() -> Self {
+        Self(AtomicBool::new(false))
+    }
+}
+
+impl AppExitState {
+    pub fn begin(&self) -> bool {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn is_exiting(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+const APP_EXIT_STEP_TIMEOUT: Duration = Duration::from_millis(750);
+const APP_EXIT_CAMERA_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(1200);
+const APP_EXIT_TOTAL_TIMEOUT: Duration = Duration::from_secs(3);
+const APP_EXIT_FORCE_TIMEOUT: Duration = Duration::from_secs(8);
+
+async fn await_exit_step<T, E, F>(name: &'static str, timeout: Duration, fut: F) -> Option<T>
+where
+    E: std::fmt::Display,
+    F: Future<Output = Result<T, E>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(err)) => {
+            warn!(step = name, error = %err, "Exit cleanup step failed");
+            None
+        }
+        Err(_) => {
+            warn!(
+                step = name,
+                timeout_ms = timeout.as_millis(),
+                "Exit cleanup step timed out"
+            );
+            None
+        }
+    }
+}
+
+fn spawn_exit_watchdog() {
+    std::thread::spawn(move || {
+        std::thread::sleep(APP_EXIT_FORCE_TIMEOUT);
+        error!(
+            timeout_ms = APP_EXIT_FORCE_TIMEOUT.as_millis(),
+            "Forcing process exit after shutdown deadline"
+        );
+        std::process::exit(0);
+    });
+}
+
+fn app_is_exiting(app: &AppHandle) -> bool {
+    match app.try_state::<AppExitState>() {
+        Some(state) => state.is_exiting(),
+        None => false,
+    }
+}
+
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -573,6 +638,15 @@ async fn set_camera_input(
     drop(app);
 
     if id == current_id && camera_in_use {
+        if id.is_some() && !skip_camera_window.unwrap_or(false) {
+            let show_result = ShowCapWindow::Camera { centered: false }
+                .show(&app_handle)
+                .await;
+            show_result
+                .map_err(|err| error!("Failed to show camera preview window: {err}"))
+                .ok();
+        }
+
         return Ok(());
     }
 
@@ -741,6 +815,10 @@ fn spawn_mic_error_handler(app_handle: AppHandle, error_rx: flume::Receiver<Stre
         let error_rx = error_rx;
 
         while let Ok(err) = error_rx.recv_async().await {
+            if app_is_exiting(&app_handle) {
+                break;
+            }
+
             error!("Mic feed actor error: {err}");
 
             {
@@ -815,6 +893,10 @@ fn spawn_devices_snapshot_emitter(app_handle: AppHandle) {
         let mut last_mics: Vec<String> = Vec::new();
         let mut fast_loops = 0u32;
         loop {
+            if app_is_exiting(&app_handle) {
+                break;
+            }
+
             let permissions = permissions::do_permissions_check(false);
             let cameras = if permissions.camera.permitted() {
                 cap_camera::list_cameras().collect::<Vec<_>>()
@@ -877,6 +959,10 @@ fn spawn_devices_snapshot_emitter(app_handle: AppHandle) {
             };
             fast_loops = fast_loops.saturating_add(1);
             tokio::time::sleep(dur).await;
+
+            if app_is_exiting(&app_handle) {
+                break;
+            }
         }
     });
 }
@@ -982,6 +1068,69 @@ async fn cleanup_camera_after_overlay_close(app: AppHandle, captured_session_id:
     app_state.camera_in_use = false;
 }
 
+async fn cleanup_app_resources_for_exit(app: &AppHandle) {
+    let (mic_feed, camera_feed, camera_shutdown) = {
+        let state = app.state::<ArcLock<App>>();
+        let mut app_state = state.write().await;
+        let camera_shutdown = app_state.camera_preview.begin_shutdown();
+        app_state.camera_in_use = false;
+        app_state.selected_camera_id = None;
+        (
+            app_state.mic_feed.clone(),
+            app_state.camera_feed.clone(),
+            camera_shutdown,
+        )
+    };
+
+    let _ = await_exit_step(
+        "remove_microphone_input",
+        APP_EXIT_STEP_TIMEOUT,
+        async move { mic_feed.ask(microphone::RemoveInput).await },
+    )
+    .await;
+    let _ = await_exit_step("remove_camera_input", APP_EXIT_STEP_TIMEOUT, async move {
+        camera_feed.ask(feeds::camera::RemoveInput).await
+    })
+    .await;
+
+    #[cfg(target_os = "macos")]
+    {
+        app.state::<CameraWindowCloseGate>().set_allow_close(true);
+        if let Some(camera_window) = CapWindowId::Camera.get(app) {
+            let _ = camera_window.close();
+        }
+    }
+
+    if let Some(rx) = camera_shutdown {
+        let _ = await_exit_step(
+            "camera_preview_shutdown",
+            APP_EXIT_CAMERA_SHUTDOWN_TIMEOUT,
+            rx,
+        )
+        .await;
+    }
+}
+
+pub async fn request_app_exit(app: AppHandle) {
+    if !app.state::<AppExitState>().begin() {
+        return;
+    }
+
+    spawn_exit_watchdog();
+
+    if tokio::time::timeout(APP_EXIT_TOTAL_TIMEOUT, cleanup_app_resources_for_exit(&app))
+        .await
+        .is_err()
+    {
+        error!(
+            timeout_ms = APP_EXIT_TOTAL_TIMEOUT.as_millis(),
+            "Timed out while cleaning up app resources for exit"
+        );
+    }
+
+    app.exit(0);
+}
+
 fn find_mic_by_label_or_fuzzy(
     devices: &microphone::MicrophonesMap,
     selected_label: &str,
@@ -1007,6 +1156,10 @@ fn spawn_microphone_watcher(app_handle: AppHandle) {
         let state = state.inner().clone();
 
         loop {
+            if app_is_exiting(&app_handle) {
+                break;
+            }
+
             let (should_check, label, is_marked) = {
                 let guard = state.read().await;
                 (
@@ -1064,6 +1217,10 @@ fn spawn_camera_watcher(app_handle: AppHandle) {
         let state = state.inner().clone();
 
         loop {
+            if app_is_exiting(&app_handle) {
+                break;
+            }
+
             let (should_check, camera_id, is_marked) = {
                 let guard = state.read().await;
                 (
@@ -1687,7 +1844,9 @@ struct SerializedEditorInstance {
 #[specta::specta]
 #[instrument(skip(window))]
 async fn create_editor_instance(window: Window) -> Result<SerializedEditorInstance, String> {
-    let CapWindowId::Editor { id } = CapWindowId::from_str(window.label()).unwrap() else {
+    let CapWindowId::Editor { id } =
+        CapWindowId::from_str(window.label()).map_err(|e| e.to_string())?
+    else {
         return Err("Invalid window".to_string());
     };
 
@@ -1723,7 +1882,9 @@ async fn create_editor_instance(window: Window) -> Result<SerializedEditorInstan
 #[specta::specta]
 #[instrument(skip(window))]
 async fn get_editor_project_path(window: Window) -> Result<PathBuf, String> {
-    let CapWindowId::Editor { id } = CapWindowId::from_str(window.label()).unwrap() else {
+    let CapWindowId::Editor { id } =
+        CapWindowId::from_str(window.label()).map_err(|e| e.to_string())?
+    else {
         return Err("Invalid window".to_string());
     };
 
@@ -1969,6 +2130,51 @@ async fn generate_zoom_segments_from_clicks(
     let zoom_segments = recording::generate_zoom_segments_for_project(meta, recordings);
 
     Ok(zoom_segments)
+}
+
+#[tauri::command]
+#[specta::specta]
+#[instrument(skip(editor_instance))]
+async fn generate_keyboard_segments(
+    editor_instance: WindowEditorInstance,
+    grouping_threshold_ms: f64,
+    linger_duration_ms: f64,
+    show_modifiers: bool,
+    show_special_keys: bool,
+) -> Result<Vec<cap_project::KeyboardTrackSegment>, String> {
+    let meta = editor_instance.meta();
+
+    let RecordingMetaInner::Studio(studio_meta) = &meta.inner else {
+        return Ok(vec![]);
+    };
+
+    let segments = match studio_meta.as_ref() {
+        StudioRecordingMeta::MultipleSegments { inner, .. } => &inner.segments,
+        _ => return Ok(vec![]),
+    };
+
+    let mut all_events = cap_project::KeyboardEvents { presses: vec![] };
+
+    for segment in segments {
+        let events = segment.keyboard_events(meta);
+        all_events.presses.extend(events.presses);
+    }
+
+    all_events.presses.sort_by(|a, b| {
+        a.time_ms
+            .partial_cmp(&b.time_ms)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let grouped = cap_project::group_key_events(
+        &all_events,
+        grouping_threshold_ms,
+        linger_duration_ms,
+        show_modifiers,
+        show_special_keys,
+    );
+
+    Ok(grouped)
 }
 
 #[tauri::command]
@@ -2481,11 +2687,7 @@ fn open_external_link(app: tauri::AppHandle, url: String) -> Result<(), String> 
 async fn reset_camera_permissions(_app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        #[cfg(debug_assertions)]
-        let bundle_id =
-            std::env::var("CAP_BUNDLE_ID").unwrap_or_else(|_| "com.apple.Terminal".to_string());
-        #[cfg(not(debug_assertions))]
-        let bundle_id = "so.cap.desktop";
+        let bundle_id = _app.config().identifier.clone();
 
         Command::new("tccutil")
             .arg("reset")
@@ -2501,18 +2703,18 @@ async fn reset_camera_permissions(_app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 #[specta::specta]
 #[instrument(skip(_app))]
-async fn reset_microphone_permissions(_app: AppHandle) -> Result<(), ()> {
-    #[cfg(debug_assertions)]
-    let bundle_id = "com.apple.Terminal";
-    #[cfg(not(debug_assertions))]
-    let bundle_id = "so.cap.desktop";
+async fn reset_microphone_permissions(_app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let bundle_id = _app.config().identifier.clone();
 
-    Command::new("tccutil")
-        .arg("reset")
-        .arg("Microphone")
-        .arg(bundle_id)
-        .output()
-        .expect("Failed to reset microphone permissions");
+        Command::new("tccutil")
+            .arg("reset")
+            .arg("Microphone")
+            .arg(bundle_id)
+            .output()
+            .map_err(|_| "Failed to reset microphone permissions".to_string())?;
+    }
 
     Ok(())
 }
@@ -2960,6 +3162,7 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
             set_project_config,
             update_project_config_in_memory,
             generate_zoom_segments_from_clicks,
+            generate_keyboard_segments,
             permissions::open_permission_settings,
             permissions::do_permissions_check,
             permissions::request_permission,
@@ -3145,8 +3348,9 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
                     flags
                 })
                 .with_denylist(&[
-                    CapWindowId::Setup.label().as_str(),
+                    CapWindowId::Onboarding.label().as_str(),
                     CapWindowId::Main.label().as_str(),
+                    CapWindowId::Settings.label().as_str(),
                     "window-capture-occluder",
                     "target-select-overlay",
                     CapWindowId::CaptureArea.label().as_str(),
@@ -3290,6 +3494,7 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
                 app.manage(CameraWindowCloseGate::default());
                 app.manage(CameraWindowPositionGuard::default());
                 app.manage(CameraWindowOperationLock::default());
+                app.manage(AppExitState::default());
 
                 app.manage(Arc::new(RwLock::new(
                     ClipboardContext::new().expect("Failed to create clipboard context"),
@@ -3309,20 +3514,24 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
             tokio::spawn({
                 let app = app.clone();
                 async move {
-                    if !permissions.screen_recording.permitted()
-                        || !permissions.accessibility.permitted()
-                        || !permissions.microphone.permitted()
-                        || !permissions.camera.permitted()
-                        || GeneralSettingsStore::get(&app)
-                            .ok()
-                            .flatten()
-                            .map(|s| !s.has_completed_startup)
-                            .unwrap_or(false)
-                    {
-                        let _ = ShowCapWindow::Setup.show(&app).await;
-                    } else {
-                        println!("Permissions granted, showing main window");
+                    let settings = GeneralSettingsStore::get(&app).ok().flatten();
+                    let startup_completed = settings
+                        .as_ref()
+                        .map(|s| s.has_completed_startup)
+                        .unwrap_or(false);
+                    let onboarding_completed = settings
+                        .as_ref()
+                        .map(|s| s.has_completed_onboarding)
+                        .unwrap_or(false);
 
+                    if !startup_completed
+                        || !onboarding_completed
+                        || !permissions.necessary_granted()
+                    {
+                        println!("Showing onboarding");
+                        let _ = ShowCapWindow::Onboarding.show(&app).await;
+                    } else {
+                        println!("Showing main window");
                         let _ = ShowCapWindow::Main {
                             init_target_mode: None,
                         }
@@ -3334,7 +3543,9 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
 
             audio_meter::spawn_event_emitter(app.clone(), mic_samples_rx);
 
-            tray::create_tray(&app).unwrap();
+            if let Err(err) = tray::create_tray(&app) {
+                error!("Failed to create tray: {err}");
+            }
 
             RequestStartRecording::listen_any_spawn(&app, async |event, app| {
                 let settings = RecordingSettingsStore::get(&app)
@@ -3397,6 +3608,16 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
             let label = window.label();
             let app = window.app_handle();
 
+            if matches!(
+                event,
+                WindowEvent::CloseRequested { .. }
+                    | WindowEvent::Moved(_)
+                    | WindowEvent::Focused(_)
+            ) && app_is_exiting(app)
+            {
+                return;
+            }
+
             match event {
                 WindowEvent::CloseRequested { api, .. } => {
                     if let Ok(window_id) = CapWindowId::from_str(label) {
@@ -3432,13 +3653,7 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
                                         let _ = camera_window.hide();
                                     }
 
-                                    for (id, overlay_window) in app.webview_windows() {
-                                        if let Ok(CapWindowId::TargetSelectOverlay { .. }) =
-                                            CapWindowId::from_str(&id)
-                                        {
-                                            let _ = overlay_window.hide();
-                                        }
-                                    }
+                                    close_target_select_overlays(app);
 
                                     let app = app.clone();
                                     tokio::spawn(async move {
@@ -3464,6 +3679,9 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
                     }
                 }
                 WindowEvent::Destroyed => {
+                    if app_is_exiting(app) {
+                        return;
+                    }
                     if let Ok(window_id) = CapWindowId::from_str(label) {
                         if matches!(window_id, CapWindowId::Camera) {
                             tracing::warn!("Camera window Destroyed event received!");
@@ -3472,13 +3690,7 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
                             CapWindowId::Main => {
                                 let app = app.clone();
 
-                                for (id, window) in app.webview_windows() {
-                                    if let Ok(CapWindowId::TargetSelectOverlay { .. }) =
-                                        CapWindowId::from_str(&id)
-                                    {
-                                        let _ = window.hide();
-                                    }
-                                }
+                                close_target_select_overlays(&app);
 
                                 if let Some(camera) = CapWindowId::Camera.get(&app) {
                                     let _ = camera.hide();
@@ -3526,12 +3738,13 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
                                             id,
                                             CapWindowId::TargetSelectOverlay { .. }
                                                 | CapWindowId::Main
-                                                | CapWindowId::Camera
                                         )
                                     {
                                         let _ = window.show();
                                     }
                                 }
+
+                                restore_camera_window(app);
 
                                 #[cfg(target_os = "windows")]
                                 if !has_open_editor_window(app) {
@@ -3547,12 +3760,12 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
                                             id,
                                             CapWindowId::TargetSelectOverlay { .. }
                                                 | CapWindowId::Main
-                                                | CapWindowId::Camera
                                         )
                                     {
                                         let _ = window.show();
                                     }
                                 }
+                                restore_camera_window(app);
                                 return;
                             }
                             CapWindowId::TargetSelectOverlay { display_id } => {
@@ -3590,10 +3803,11 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
 
                     if let Some(settings) = GeneralSettingsStore::get(app).unwrap_or(None)
                         && settings.hide_dock_icon
-                        && app
-                            .webview_windows()
-                            .keys()
-                            .all(|label| !CapWindowId::from_str(label).unwrap().activates_dock())
+                        && app.webview_windows().keys().all(|label| {
+                            CapWindowId::from_str(label)
+                                .map(|id| !id.activates_dock())
+                                .unwrap_or(false)
+                        })
                     {
                         #[cfg(target_os = "macos")]
                         app.set_activation_policy(tauri::ActivationPolicy::Accessory)
@@ -3669,12 +3883,18 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
         .run(move |_handle, event| match event {
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
+                if let Some(onboarding) = CapWindowId::Onboarding.get(_handle) {
+                    onboarding.show().ok();
+                    onboarding.set_focus().ok();
+                    return;
+                }
+
                 let has_window = _handle.webview_windows().iter().any(|(label, _)| {
                     label.starts_with("editor-")
                         || label.starts_with("screenshot-editor-")
                         || label.as_str() == "settings"
                         || label.as_str() == "signin"
-                        || label.as_str() == "setup"
+                        || label.as_str() == "onboarding"
                 });
 
                 if has_window {
@@ -3686,7 +3906,7 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
                                 || label.starts_with("screenshot-editor-")
                                 || label.as_str() == "settings"
                                 || label.as_str() == "signin"
-                                || label.as_str() == "setup"
+                                || label.as_str() == "onboarding"
                         })
                         .map(|(_, window)| window.clone())
                     {
@@ -3704,24 +3924,31 @@ pub async fn run(recording_logging_handle: LoggingHandle, logs_dir: PathBuf) {
                 }
             }
             tauri::RunEvent::ExitRequested { code, api, .. } => {
-                if code.is_none() {
-                    api.prevent_exit();
+                if _handle.state::<AppExitState>().is_exiting() {
+                    return;
                 }
+
+                api.prevent_exit();
+
+                let _ = code;
+                let handle = _handle.clone();
+                tokio::spawn(async move {
+                    request_app_exit(handle).await;
+                });
             }
             tauri::RunEvent::Exit => {
+                if !_handle.state::<AppExitState>().begin() {
+                    return;
+                }
+
                 let handle = _handle.clone();
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let state = handle.state::<ArcLock<App>>();
-                    let _ = tauri::async_runtime::block_on(async {
-                        tokio::time::timeout(Duration::from_secs(2), async {
-                            let app_state = &mut *state.write().await;
-                            let _ = app_state.mic_feed.ask(microphone::RemoveInput).await;
-                            let _ = app_state.camera_feed.ask(feeds::camera::RemoveInput).await;
-                            app_state.camera_in_use = false;
-                        })
-                        .await
-                    });
-                }));
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        cleanup_app_resources_for_exit(&handle),
+                    )
+                    .await;
+                });
             }
             _ => {}
         });
@@ -3746,8 +3973,35 @@ fn restore_main_windows_if_no_editors(app: &AppHandle) {
         if let Some(main) = CapWindowId::Main.get(app) {
             let _ = main.show();
         }
-        if let Some(camera) = CapWindowId::Camera.get(app) {
-            let _ = camera.show();
+
+        restore_camera_window(app);
+    }
+}
+
+fn restore_camera_window(app: &AppHandle) {
+    let should_restore_camera = app
+        .state::<ArcLock<App>>()
+        .try_read()
+        .map(|state| state.selected_camera_id.is_some())
+        .unwrap_or(false);
+
+    if should_restore_camera {
+        let app = app.clone();
+        tokio::spawn(async move {
+            let operation_lock = app.state::<CameraWindowOperationLock>();
+            let _operation_guard = operation_lock.lock().await;
+            let _ = ShowCapWindow::Camera { centered: false }.show(&app).await;
+        });
+    }
+}
+
+fn close_target_select_overlays(app: &AppHandle) {
+    let focus_manager = app.state::<target_select_overlay::WindowFocusManager>();
+
+    for (label, window) in app.webview_windows() {
+        if let Ok(CapWindowId::TargetSelectOverlay { display_id }) = CapWindowId::from_str(&label) {
+            let _ = window.hide();
+            focus_manager.destroy(&display_id, app.global_shortcut());
         }
     }
 }
@@ -3902,17 +4156,16 @@ async fn create_editor_instance_impl(
 
     wait_for_recording_ready(&app, &path).await?;
 
-    let shared_device = if let Some(shared) = gpu_context::get_shared_gpu().await {
-        Some(cap_rendering::SharedWgpuDevice {
-            instance: (*shared.instance).clone(),
-            adapter: (*shared.adapter).clone(),
-            device: (*shared.device).clone(),
-            queue: (*shared.queue).clone(),
-            is_software_adapter: shared.is_software_adapter,
-        })
-    } else {
-        None
-    };
+    let shared_device =
+        gpu_context::get_shared_gpu()
+            .await
+            .map(|shared| cap_rendering::SharedWgpuDevice {
+                instance: (*shared.instance).clone(),
+                adapter: (*shared.adapter).clone(),
+                device: (*shared.device).clone(),
+                queue: (*shared.queue).clone(),
+                is_software_adapter: shared.is_software_adapter,
+            });
 
     let instance = {
         let app = app.clone();

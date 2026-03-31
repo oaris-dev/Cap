@@ -150,6 +150,8 @@ async fn load_recording(
                 scene_segments: Vec::new(),
                 mask_segments: Vec::new(),
                 text_segments: Vec::new(),
+                caption_segments: Vec::new(),
+                keyboard_segments: Vec::new(),
             });
         }
     }
@@ -257,7 +259,7 @@ async fn run_full_pipeline_benchmark(
 
     println!(
         "  GPU adapter: {} (software={})",
-        render_constants._adapter.get_info().name,
+        render_constants.adapter_name(),
         render_constants.is_software_adapter
     );
 
@@ -356,8 +358,14 @@ async fn run_full_pipeline_benchmark(
         let zoom_focus_interpolator = ZoomFocusInterpolator::new(
             &segment_media.cursor,
             cursor_smoothing,
+            project.cursor.click_spring_config(),
             project.screen_movement_spring,
             duration,
+            project
+                .timeline
+                .as_ref()
+                .map(|t| t.zoom_segments.as_slice())
+                .unwrap_or(&[]),
         );
 
         let uniforms = ProjectUniforms::new(
@@ -518,8 +526,14 @@ async fn run_scrubbing_benchmark(
         let zoom_focus_interpolator = ZoomFocusInterpolator::new(
             &segment_media.cursor,
             cursor_smoothing,
+            project.cursor.click_spring_config(),
             project.screen_movement_spring,
             duration,
+            project
+                .timeline
+                .as_ref()
+                .map(|t| t.zoom_segments.as_slice())
+                .unwrap_or(&[]),
         );
 
         let uniforms = ProjectUniforms::new(

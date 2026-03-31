@@ -1,7 +1,13 @@
 import { db } from "@cap/database";
+import * as Db from "@cap/database/schema";
 import { videos as videosTable } from "@cap/database/schema";
 import { serverEnv } from "@cap/env";
-import { provideOptionalAuth, S3Buckets, Videos } from "@cap/web-backend";
+import {
+	Database,
+	provideOptionalAuth,
+	S3Buckets,
+	Videos,
+} from "@cap/web-backend";
 import { Video } from "@cap/web-domain";
 import {
 	HttpApi,
@@ -25,7 +31,7 @@ export const dynamic = "force-dynamic";
 
 const GetPlaylistParams = Schema.Struct({
 	videoId: Video.VideoId,
-	videoType: Schema.Literal("video", "audio", "master", "mp4"),
+	videoType: Schema.Literal("video", "audio", "master", "mp4", "raw-preview"),
 	thumbnail: Schema.OptionFromUndefinedOr(Schema.String),
 	fileType: Schema.OptionFromUndefinedOr(Schema.String),
 	token: Schema.OptionFromUndefinedOr(Schema.String),
@@ -89,6 +95,24 @@ const getPlaylistResponse = (
 		const [s3, customBucket] = yield* S3Buckets.getBucketAccess(video.bucketId);
 		const isMp4Source =
 			video.source.type === "desktopMP4" || video.source.type === "webMP4";
+
+		if (urlParams.videoType === "raw-preview") {
+			const db = yield* Database;
+			const [uploadRecord] = yield* db.use((db) =>
+				db
+					.select({ rawFileKey: Db.videoUploads.rawFileKey })
+					.from(Db.videoUploads)
+					.where(eq(Db.videoUploads.videoId, urlParams.videoId)),
+			);
+
+			if (!uploadRecord?.rawFileKey) {
+				return yield* Effect.fail(new HttpApiError.NotFound());
+			}
+
+			return yield* s3
+				.getSignedObjectUrl(uploadRecord.rawFileKey)
+				.pipe(Effect.map(HttpServerResponse.redirect));
+		}
 
 		if (Option.isNone(customBucket)) {
 			let redirect = `${video.ownerId}/${video.id}/combined-source/stream.m3u8`;
@@ -175,34 +199,19 @@ const getPlaylistResponse = (
 					.pipe(Effect.map(HttpServerResponse.redirect));
 			}
 
-			let prefix;
-			switch (urlParams.videoType) {
-				case "video":
-					prefix = videoPrefix;
-					break;
-				case "audio":
-					prefix = audioPrefix;
-					break;
-				case "master":
-					prefix = null;
-					break;
-			}
-
-			if (prefix === null) {
+			if (urlParams.videoType === "master") {
 				const [videoSegment, audioSegment] = yield* Effect.all([
 					s3.listObjects({ prefix: videoPrefix, maxKeys: 1 }),
 					s3.listObjects({ prefix: audioPrefix, maxKeys: 1 }),
 				]);
 
-				let audioMetadata;
 				const videoMetadata = yield* s3.headObject(
 					videoSegment.Contents?.[0]?.Key ?? "",
 				);
-				if (audioSegment?.KeyCount && audioSegment?.KeyCount > 0) {
-					audioMetadata = yield* s3.headObject(
-						audioSegment.Contents?.[0]?.Key ?? "",
-					);
-				}
+				const audioMetadata =
+					audioSegment?.KeyCount && audioSegment.KeyCount > 0
+						? yield* s3.headObject(audioSegment.Contents?.[0]?.Key ?? "")
+						: undefined;
 
 				const tokenSuffix = Option.isSome(urlParams.token)
 					? `&token=${encodeURIComponent(urlParams.token.value)}`
@@ -219,6 +228,17 @@ const getPlaylistResponse = (
 				return HttpServerResponse.text(generatedPlaylist, {
 					headers: CACHE_CONTROL_HEADERS,
 				});
+			}
+
+			const prefix =
+				urlParams.videoType === "video"
+					? videoPrefix
+					: urlParams.videoType === "audio"
+						? audioPrefix
+						: undefined;
+
+			if (!prefix) {
+				return yield* Effect.fail(new HttpApiError.NotFound());
 			}
 
 			const objects = yield* s3.listObjects({

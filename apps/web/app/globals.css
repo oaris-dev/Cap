@@ -783,10 +783,11 @@ footer a {
 }
 
 .prose .not-prose p,
-.prose .not-prose li {
-	color: inherit !important;
-	font-size: inherit !important;
-	line-height: inherit !important;
+.prose .not-prose li,
+.prose .not-prose a {
+	color: inherit;
+	font-size: inherit;
+	line-height: inherit;
 }
 
 .new-card-style {
@@ -913,11 +914,19 @@ footer a {
 }
 
 .messenger-markdown > :first-child {
-	margin-top: 0 !important;
+	margin-top: 0;
 }
 
 .messenger-markdown > :last-child {
-	margin-bottom: 0 !important;
+	margin-bottom: 0;
+}
+
+.font-league-spartan {
+	font-family: var(--font-league-spartan), sans-serif;
+}
+
+.font-lexend {
+	font-family: var(--font-lexend), sans-serif;
 }
 
 .font-league-spartan {

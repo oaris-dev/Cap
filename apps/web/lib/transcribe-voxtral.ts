@@ -39,18 +39,14 @@ export async function transcribeWithVoxtral(
 		formData.append("response_format", "verbose_json");
 		formData.append("timestamp_granularities", "word");
 
-		const baseUrl =
-			serverEnv().MISTRAL_API_URL ?? "https://api.mistral.ai";
-		const response = await fetch(
-			`${baseUrl}/v1/audio/transcriptions`,
-			{
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${apiKey}`,
-				},
-				body: formData,
+		const baseUrl = serverEnv().MISTRAL_API_URL ?? "https://api.mistral.ai";
+		const response = await fetch(`${baseUrl}/v1/audio/transcriptions`, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${apiKey}`,
 			},
-		);
+			body: formData,
+		});
 
 		if (!response.ok) {
 			const errorBody = await response.text();

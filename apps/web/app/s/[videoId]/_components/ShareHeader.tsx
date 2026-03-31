@@ -8,10 +8,10 @@ import {
 	faLock,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { Check, Copy, Globe2 } from "lucide-react";
+import { Check, Clock, Copy, Globe2 } from "lucide-react";
 import moment from "moment";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { editTitle } from "@/actions/videos/edit-title";
 import { useDashboardContext } from "@/app/(org)/dashboard/Contexts";
@@ -59,6 +59,23 @@ export const ShareHeader = ({
 	const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
 	const [isSharingDialogOpen, setIsSharingDialogOpen] = useState(false);
 	const [linkCopied, setLinkCopied] = useState(false);
+	const [showCopyOptions, setShowCopyOptions] = useState(false);
+	const [capturedTime, setCapturedTime] = useState(0);
+	const copyOptionsRef = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		if (!showCopyOptions) return;
+		const handler = (e: MouseEvent) => {
+			if (
+				copyOptionsRef.current &&
+				!copyOptionsRef.current.contains(e.target as Node)
+			) {
+				setShowCopyOptions(false);
+			}
+		};
+		document.addEventListener("mousedown", handler);
+		return () => document.removeEventListener("mousedown", handler);
+	}, [showCopyOptions]);
 
 	const contextData = useDashboardContext();
 	const contextSharedSpaces = contextData?.sharedSpaces || null;
@@ -129,6 +146,39 @@ export const ShareHeader = ({
 		} else {
 			return `${webUrl}/s/${data.id}`;
 		}
+	};
+
+	const formatTimestamp = (seconds: number): string => {
+		const h = Math.floor(seconds / 3600);
+		const m = Math.floor((seconds % 3600) / 60);
+		const s = seconds % 60;
+		if (h > 0)
+			return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+		return `${m}:${String(s).padStart(2, "0")}`;
+	};
+
+	const handleCopyClick = () => {
+		const video = document.querySelector("video");
+		const currentTime = video ? Math.floor(video.currentTime) : 0;
+
+		if (currentTime > 3) {
+			setCapturedTime(currentTime);
+			setShowCopyOptions(true);
+		} else {
+			navigator.clipboard.writeText(getVideoLink());
+			setLinkCopied(true);
+			setTimeout(() => setLinkCopied(false), 2000);
+		}
+	};
+
+	const handleCopyLink = (withTimestamp: boolean) => {
+		const link = withTimestamp
+			? `${getVideoLink()}?t=${capturedTime}`
+			: getVideoLink();
+		navigator.clipboard.writeText(link);
+		setShowCopyOptions(false);
+		setLinkCopied(true);
+		setTimeout(() => setLinkCopied(false), 2000);
 	};
 
 	const handleSharingUpdated = () => {
@@ -260,8 +310,8 @@ export const ShareHeader = ({
 						</div>
 					</div>
 					{user !== null && (
-						<div className="flex space-x-2">
-							<div>
+						<div className="flex items-center space-x-2">
+							<div className="min-w-0 flex-1">
 								<div className="flex gap-2 items-center">
 									{data.hasPassword && (
 										<FontAwesomeIcon
@@ -269,23 +319,36 @@ export const ShareHeader = ({
 											icon={faLock}
 										/>
 									)}
-									<Button
-										variant="white"
-										onClick={() => {
-											navigator.clipboard.writeText(getVideoLink());
-											setLinkCopied(true);
-											setTimeout(() => {
-												setLinkCopied(false);
-											}, 2000);
-										}}
-									>
-										{getDisplayLink()}
-										{linkCopied ? (
-											<Check className="ml-2 w-4 h-4 svgpathanimation" />
-										) : (
-											<Copy className="ml-2 w-4 h-4" />
+									<div className="relative min-w-0" ref={copyOptionsRef}>
+										<Button variant="white" className="max-w-full" onClick={handleCopyClick}>
+											<span className="truncate">{getDisplayLink()}</span>
+											{linkCopied ? (
+												<Check className="ml-2 w-4 h-4 svgpathanimation" />
+											) : (
+												<Copy className="ml-2 w-4 h-4" />
+											)}
+										</Button>
+										{showCopyOptions && (
+											<div className="absolute right-0 top-full z-50 mt-1 min-w-full w-max overflow-hidden rounded-lg border border-gray-6 bg-white shadow-lg">
+												<button
+													type="button"
+													className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-12 transition-colors hover:bg-gray-3"
+													onClick={() => handleCopyLink(false)}
+												>
+													<Copy className="w-3.5 h-3.5 shrink-0" />
+													Copy link
+												</button>
+												<button
+													type="button"
+													className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-12 transition-colors hover:bg-gray-3"
+													onClick={() => handleCopyLink(true)}
+												>
+													<Clock className="w-3.5 h-3.5 shrink-0" />
+													Copy link at {formatTimestamp(capturedTime)}
+												</button>
+											</div>
 										)}
-									</Button>
+									</div>
 								</div>
 								{userIsOwnerAndNotPro && (
 									<button
@@ -299,7 +362,7 @@ export const ShareHeader = ({
 								)}
 							</div>
 							{user !== null && (
-								<div className="hidden md:flex gap-2">
+								<div className="hidden md:flex gap-2 shrink-0">
 									{isOwner && (
 										<Tooltip
 											content={t("header.viewAnalytics")}
@@ -321,6 +384,7 @@ export const ShareHeader = ({
 										</Tooltip>
 									)}
 									<Button
+										className="whitespace-nowrap"
 										onClick={() => {
 											push("/dashboard/caps?page=1");
 										}}

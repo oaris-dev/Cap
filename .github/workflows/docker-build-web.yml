@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - oaris/deploy
+      - oaris/staging
     paths:
       - "apps/web/**"
       - "packages/**"
@@ -48,6 +49,16 @@ jobs:
         run: |
           echo "REPOSITORY_OWNER=${GITHUB_REPOSITORY_OWNER@L}" >>${GITHUB_ENV}
 
+      - name: Determine image tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ] && [ "${{ inputs.tag }}" != "latest" ]; then
+            echo "IMAGE_TAG=${{ inputs.tag }}" >>${GITHUB_ENV}
+          elif [ "${{ github.ref_name }}" = "oaris/staging" ]; then
+            echo "IMAGE_TAG=staging" >>${GITHUB_ENV}
+          else
+            echo "IMAGE_TAG=latest" >>${GITHUB_ENV}
+          fi
+
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v5
         with:
@@ -55,6 +66,6 @@ jobs:
           file: apps/web/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/${{ env.REPOSITORY_OWNER }}/cap-web:${{ inputs.tag || 'latest' }}
+          tags: ghcr.io/${{ env.REPOSITORY_OWNER }}/cap-web:${{ env.IMAGE_TAG }}
           cache-from: type=gha,scope=buildx-amd64
           cache-to: type=gha,mode=max,scope=buildx-amd64

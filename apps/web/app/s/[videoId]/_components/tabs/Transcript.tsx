@@ -1,7 +1,7 @@
 "use client";
 
 import { Button } from "@cap/ui";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useInvalidateTranscript, useTranscript } from "hooks/use-transcript";
 import {
 	Check,
@@ -134,6 +134,7 @@ const parseVTT = (vttContent: string): TranscriptEntry[] => {
 
 export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 	const user = useCurrentUser();
+	const queryClient = useQueryClient();
 	const captionContext = useCaptionContext();
 	const [transcriptData, setTranscriptData] = useState<TranscriptEntry[]>([]);
 	const [selectedEntry, setSelectedEntry] = useState<number | null>(null);
@@ -177,9 +178,9 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 		onSuccess: () => {
 			setRetryTriggered(true);
 			invalidateTranscript(data.id);
-		},
-		onError: (error) => {
-			console.error("Failed to retry transcription:", error);
+			queryClient.invalidateQueries({
+				queryKey: ["videoStatus", data.id],
+			});
 		},
 	});
 
@@ -386,6 +387,30 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 					<p className="mt-1 text-xs text-gray-9">
 						{t("transcript.noAudioDescription")}
 					</p>
+					{canEdit && (
+						<>
+							<Button
+								type="button"
+								onClick={() => {
+									retryTranscriptionMutation.mutate();
+								}}
+								disabled={retryTranscriptionMutation.isPending}
+								variant="primary"
+								size="sm"
+								spinner={retryTranscriptionMutation.isPending}
+								className="mt-4"
+							>
+								{retryTranscriptionMutation.isPending
+									? "Retrying..."
+									: "Retry transcription"}
+							</Button>
+							{retryTranscriptionMutation.isError && (
+								<p className="mt-2 text-xs text-red-500">
+									Failed to retry. Please try again.
+								</p>
+							)}
+						</>
+					)}
 				</div>
 			</div>
 		);
@@ -426,19 +451,26 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 							: t("transcript.noTranscript")}
 					</p>
 					{canEdit && (
-						<Button
-							onClick={() => {
-								retryTranscriptionMutation.mutate();
-							}}
-							disabled={retryTranscriptionMutation.isPending}
-							variant="primary"
-							size="sm"
-							spinner={retryTranscriptionMutation.isPending}
-						>
-							{retryTranscriptionMutation.isPending
-								? t("transcript.retrying")
-								: t("transcript.retryTranscription")}
-						</Button>
+						<>
+							<Button
+								onClick={() => {
+									retryTranscriptionMutation.mutate();
+								}}
+								disabled={retryTranscriptionMutation.isPending}
+								variant="primary"
+								size="sm"
+								spinner={retryTranscriptionMutation.isPending}
+							>
+								{retryTranscriptionMutation.isPending
+									? t("transcript.retrying")
+									: t("transcript.retryTranscription")}
+							</Button>
+							{retryTranscriptionMutation.isError && (
+								<p className="mt-2 text-xs text-red-500">
+									Failed to retry. Please try again.
+								</p>
+							)}
+						</>
 					)}
 				</div>
 			</div>

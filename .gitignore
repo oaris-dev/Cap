@@ -16,6 +16,7 @@ dist-ssr
 .env.development
 .env.test
 target
+target-agent
 .cursorrules
 .github/hooks
 
@@ -69,6 +70,6 @@ scripts/releases-backfill-data.txt
 analysis/
 analysis/plans/
 .ralphy
+tmp/
 
-# OARIS fork docs (local, not committed to public repo)
 .oaris/

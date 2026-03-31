@@ -24,7 +24,7 @@ import { OarisLogo } from "@/components/OarisLogo";
 
 declare global {
 	interface Window {
-		MSStream: any;
+		MSStream: unknown;
 	}
 }
 
@@ -43,17 +43,30 @@ export const EmbedVideo = forwardRef<
 		chapters?: { title: string; start: number }[];
 		ownerName?: string | null;
 		autoplay?: boolean;
+		showPlaybackStatusBadge?: boolean;
 		embedToken?: string;
 	}
 >(
 	(
-		{ data, user, comments, chapters = [], autoplay = false, embedToken },
+		{
+			data,
+			user: _user,
+			comments: _comments,
+			chapters = [],
+			ownerName,
+			autoplay: _autoplay = false,
+			showPlaybackStatusBadge = false,
+			embedToken,
+		},
 		ref,
 	) => {
 		const videoRef = useRef<HTMLVideoElement>(null);
 		useImperativeHandle(ref, () => videoRef.current as HTMLVideoElement);
 
 		const [transcriptData, setTranscriptData] = useState<TranscriptEntry[]>([]);
+		const [longestDuration, setLongestDuration] = useState<number>(
+			data.duration ?? 0,
+		);
 		const [isPlaying, setIsPlaying] = useState(false);
 		const [subtitleUrl, setSubtitleUrl] = useState<string | null>(null);
 		const [chaptersUrl, setChaptersUrl] = useState<string | null>(null);
@@ -120,10 +133,14 @@ export const EmbedVideo = forwardRef<
 		const isMp4Source =
 			data.source.type === "desktopMP4" || data.source.type === "webMP4";
 		let videoSrc: string;
-		let enableCrossOrigin = false;
 		const tokenParam = embedToken
 			? `&token=${encodeURIComponent(embedToken)}`
 			: "";
+		const rawFallbackSrc =
+			data.source.type === "webMP4"
+				? `/api/playlist?userId=${data.ownerId}&videoId=${data.id}&videoType=raw-preview${tokenParam}`
+				: undefined;
+		let enableCrossOrigin = false;
 
 		if (isMp4Source) {
 			videoSrc = `/api/playlist?userId=${data.ownerId}&videoId=${data.id}&videoType=mp4${tokenParam}`;
@@ -161,6 +178,9 @@ export const EmbedVideo = forwardRef<
 							videoId={data.id}
 							mediaPlayerClassName="w-full h-full"
 							videoSrc={videoSrc}
+							rawFallbackSrc={rawFallbackSrc}
+							duration={data.duration}
+							showPlaybackStatusBadge={showPlaybackStatusBadge}
 							chaptersSrc={chaptersUrl || ""}
 							captionsSrc={subtitleUrl || ""}
 							videoRef={videoRef}
@@ -172,6 +192,7 @@ export const EmbedVideo = forwardRef<
 							videoId={data.id}
 							mediaPlayerClassName="w-full h-full"
 							videoSrc={videoSrc}
+							duration={data.duration}
 							chaptersSrc={chaptersUrl || ""}
 							captionsSrc={subtitleUrl || ""}
 							videoRef={videoRef}

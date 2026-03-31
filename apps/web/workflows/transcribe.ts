@@ -1,6 +1,12 @@
 import { promises as fs } from "node:fs";
 import { db } from "@cap/database";
-import { organizations, s3Buckets, users, videos } from "@cap/database/schema";
+import {
+	organizations,
+	s3Buckets,
+	users,
+	videos,
+	videoUploads,
+} from "@cap/database/schema";
 import type { VideoMetadata } from "@cap/database/types";
 import { serverEnv } from "@cap/env";
 import { userIsPro } from "@cap/utils";
@@ -14,7 +20,6 @@ import {
 	ENHANCED_AUDIO_CONTENT_TYPE,
 	ENHANCED_AUDIO_EXTENSION,
 	enhanceAudioFromUrl,
-	isAudioEnhancementConfigured,
 } from "@/lib/audio-enhance";
 import { checkHasAudioTrack, extractAudioFromUrl } from "@/lib/audio-extract";
 import { startAiGeneration } from "@/lib/generate-ai";
@@ -22,6 +27,7 @@ import {
 	checkHasAudioTrackViaMediaServer,
 	extractAudioViaMediaServer,
 	isMediaServerConfigured,
+	probeVideoViaMediaServer,
 } from "@/lib/media-client";
 import { runPromise } from "@/lib/server";
 import { type DeepgramResult, formatToWebVTT } from "@/lib/transcribe-utils";
@@ -171,31 +177,47 @@ async function extractAudio(
 		Option.fromNullable(bucketId),
 	).pipe(runPromise);
 
-	const videoKey = `${userId}/${videoId}/result.mp4`;
-	const videoUrl = await bucket.getSignedObjectUrl(videoKey).pipe(runPromise);
-
-	const response = await fetch(videoUrl, {
-		method: "GET",
-		headers: { range: "bytes=0-0" },
-	});
-	if (!response.ok) {
-		throw new Error("Video file not accessible");
-	}
+	const videoUrl = await resolveVideoSourceUrl(videoId, userId, bucketId);
 
 	const useMediaServer = isMediaServerConfigured();
+	console.log(
+		`[transcribe] Audio detection: useMediaServer=${useMediaServer}, videoId=${videoId}`,
+	);
 
 	let hasAudio: boolean;
 	let audioBuffer: Buffer;
 
 	if (useMediaServer) {
-		hasAudio = await checkHasAudioTrackViaMediaServer(videoUrl);
+		try {
+			const probe = await probeVideoViaMediaServer(videoUrl);
+			console.log(
+				`[transcribe] Probe result for ${videoId}: audioCodec=${probe.audioCodec}, videoCodec=${probe.videoCodec}, duration=${probe.duration}, audioChannels=${probe.audioChannels}, sampleRate=${probe.sampleRate}`,
+			);
+			hasAudio = probe.audioCodec !== null;
+		} catch (probeError) {
+			console.error(
+				`[transcribe] Probe failed for ${videoId}, falling back to audio check:`,
+				probeError,
+			);
+			hasAudio = await checkHasAudioTrackViaMediaServer(videoUrl);
+			console.log(
+				`[transcribe] Fallback audio check result for ${videoId}: hasAudio=${hasAudio}`,
+			);
+		}
+
 		if (!hasAudio) {
+			console.log(
+				`[transcribe] No audio track detected for ${videoId} via media server`,
+			);
 			return null;
 		}
 
 		audioBuffer = await extractAudioViaMediaServer(videoUrl);
 	} else {
 		hasAudio = await checkHasAudioTrack(videoUrl);
+		console.log(
+			`[transcribe] Local ffmpeg audio check for ${videoId}: hasAudio=${hasAudio}`,
+		);
 		if (!hasAudio) {
 			return null;
 		}
@@ -209,6 +231,10 @@ async function extractAudio(
 		}
 	}
 
+	console.log(
+		`[transcribe] Extracted audio for ${videoId}: ${audioBuffer.length} bytes`,
+	);
+
 	const audioKey = `${userId}/${videoId}/audio-temp.mp3`;
 
 	await bucket
@@ -218,10 +244,49 @@ async function extractAudio(
 		.pipe(runPromise);
 
 	const audioSignedUrl = await bucket
-		.getSignedObjectUrl(audioKey)
+		.getInternalSignedObjectUrl(audioKey)
 		.pipe(runPromise);
 
 	return audioSignedUrl;
+}
+
+async function resolveVideoSourceUrl(
+	videoId: string,
+	userId: string,
+	bucketId: S3Bucket.S3BucketId | null,
+): Promise<string> {
+	const [bucket] = await S3Buckets.getBucketAccess(
+		Option.fromNullable(bucketId),
+	).pipe(runPromise);
+
+	const upload = await db()
+		.select({ rawFileKey: videoUploads.rawFileKey })
+		.from(videoUploads)
+		.where(eq(videoUploads.videoId, videoId as Video.VideoId))
+		.limit(1);
+
+	const candidateKeys = [
+		`${userId}/${videoId}/result.mp4`,
+		upload[0]?.rawFileKey,
+	].filter(
+		(value, index, values): value is string =>
+			Boolean(value) && values.indexOf(value) === index,
+	);
+
+	for (const key of candidateKeys) {
+		const url = await bucket.getInternalSignedObjectUrl(key).pipe(runPromise);
+		const response = await fetch(url, {
+			method: "GET",
+			headers: { range: "bytes=0-0" },
+		});
+
+		if (response.ok) {
+			console.log(`[transcribe] Using video source ${key}`);
+			return url;
+		}
+	}
+
+	throw new Error("Video file not accessible");
 }
 
 async function transcribeAudio(audioUrl: string): Promise<string> {
@@ -337,7 +402,7 @@ async function queueAiGeneration(
 	await startAiGeneration(videoId as Video.VideoId, userId);
 }
 
-async function markEnhancedAudioProcessing(videoId: string): Promise<void> {
+async function _markEnhancedAudioProcessing(videoId: string): Promise<void> {
 	"use step";
 
 	const [video] = await db()
@@ -358,7 +423,7 @@ async function markEnhancedAudioProcessing(videoId: string): Promise<void> {
 		.where(eq(videos.id, videoId as Video.VideoId));
 }
 
-async function enhanceAndSaveAudio(
+async function _enhanceAndSaveAudio(
 	videoId: string,
 	userId: string,
 	audioUrl: string,

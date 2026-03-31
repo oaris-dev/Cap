@@ -1,6 +1,11 @@
 import { promises as fs } from "node:fs";
 import { db } from "@cap/database";
-import { organizations, s3Buckets, videos } from "@cap/database/schema";
+import {
+	organizations,
+	s3Buckets,
+	videos,
+	videoUploads,
+} from "@cap/database/schema";
 import { serverEnv } from "@cap/env";
 import { S3Buckets } from "@cap/web-backend";
 import type { S3Bucket, Video } from "@cap/web-domain";
@@ -107,6 +112,23 @@ export async function transcribeVideo(
 		};
 	}
 
+	const upload = await db()
+		.select({ phase: videoUploads.phase })
+		.from(videoUploads)
+		.where(eq(videoUploads.videoId, videoId))
+		.limit(1);
+
+	if (
+		upload[0]?.phase === "uploading" ||
+		upload[0]?.phase === "processing" ||
+		upload[0]?.phase === "generating_thumbnail"
+	) {
+		return {
+			success: true,
+			message: "Video upload is still in progress",
+		};
+	}
+
 	try {
 		console.log(
 			`[transcribeVideo] Starting direct transcription for video ${videoId}`,
@@ -151,11 +173,12 @@ async function transcribeVideoDirect(
 		.leftJoin(s3Buckets, eq(videos.bucket, s3Buckets.id))
 		.where(eq(videos.id, videoId as Video.VideoId));
 
-	if (query.length === 0) {
+	const row = query[0];
+	if (!row) {
 		throw new Error("Video does not exist");
 	}
 
-	const { bucket } = query[0];
+	const { bucket } = row;
 	const bucketId = (bucket?.id ?? null) as S3Bucket.S3BucketId | null;
 
 	const [s3Bucket] = await S3Buckets.getBucketAccess(
