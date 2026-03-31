@@ -525,11 +525,6 @@ export function CapVideoPlayer({
 				<div className="flex flex-col gap-3 items-center">
 					<OarisLogo className="w-8 h-auto sm:w-10 text-white" />
 					<div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-					{retryCount.current > 0 && (
-						<p className="text-sm text-white opacity-75">
-							Preparing video... ({retryCount.current}/{maxRetries})
-						</p>
-					)}
 				</div>
 			</div>
 			{showRawPlaybackBadge && (

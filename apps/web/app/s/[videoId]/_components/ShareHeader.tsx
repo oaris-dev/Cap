@@ -310,8 +310,8 @@ export const ShareHeader = ({
 						</div>
 					</div>
 					{user !== null && (
-						<div className="flex space-x-2">
-							<div>
+						<div className="flex items-center space-x-2">
+							<div className="min-w-0 flex-1">
 								<div className="flex gap-2 items-center">
 									{data.hasPassword && (
 										<FontAwesomeIcon
@@ -319,9 +319,9 @@ export const ShareHeader = ({
 											icon={faLock}
 										/>
 									)}
-									<div className="relative" ref={copyOptionsRef}>
-										<Button variant="white" onClick={handleCopyClick}>
-											{getDisplayLink()}
+									<div className="relative min-w-0" ref={copyOptionsRef}>
+										<Button variant="white" className="max-w-full" onClick={handleCopyClick}>
+											<span className="truncate">{getDisplayLink()}</span>
 											{linkCopied ? (
 												<Check className="ml-2 w-4 h-4 svgpathanimation" />
 											) : (
@@ -362,7 +362,7 @@ export const ShareHeader = ({
 								)}
 							</div>
 							{user !== null && (
-								<div className="hidden md:flex gap-2">
+								<div className="hidden md:flex gap-2 shrink-0">
 									{isOwner && (
 										<Tooltip
 											content={t("header.viewAnalytics")}
@@ -384,6 +384,7 @@ export const ShareHeader = ({
 										</Tooltip>
 									)}
 									<Button
+										className="whitespace-nowrap"
 										onClick={() => {
 											push("/dashboard/caps?page=1");
 										}}

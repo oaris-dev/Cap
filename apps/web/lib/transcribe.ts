@@ -173,11 +173,12 @@ async function transcribeVideoDirect(
 		.leftJoin(s3Buckets, eq(videos.bucket, s3Buckets.id))
 		.where(eq(videos.id, videoId as Video.VideoId));
 
-	if (query.length === 0) {
+	const row = query[0];
+	if (!row) {
 		throw new Error("Video does not exist");
 	}
 
-	const { bucket } = query[0];
+	const { bucket } = row;
 	const bucketId = (bucket?.id ?? null) as S3Bucket.S3BucketId | null;
 
 	const [s3Bucket] = await S3Buckets.getBucketAccess(
