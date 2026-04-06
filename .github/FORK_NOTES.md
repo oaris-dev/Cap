@@ -17,7 +17,7 @@ If an upstream sync re-introduces these files via merge conflict, resolve by kee
 
 | Workflow | File | Notes |
 |---|---|---|
-| CI | `ci.yml` | Core quality gate (lint, typecheck, build) |
+| CI | `ci.yml` | **Trimmed to web-only** (typecheck + Biome). Removed desktop builds, Clippy, Rust cache, cargo fmt — all macOS/Windows runner jobs stripped. On upstream sync, keep our slimmed version. |
 | Docker Build Web | `docker-build-web.yml` | Manual trigger only |
 | Docker Build Media Server | `docker-build-media-server.yml` | Triggers on media-server path changes |
 | Test Self-Hosting | `test-self-hosting.yml` | Validates Docker Compose setup |
