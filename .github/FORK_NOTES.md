@@ -13,6 +13,14 @@ When syncing with upstream, **do not re-add** the following workflow files:
 
 If an upstream sync re-introduces these files via merge conflict, resolve by keeping them deleted.
 
+## Post-Sync Checklist
+
+After every upstream sync:
+
+1. **Re-trim `ci.yml`** if upstream changes overwrote our slimmed version (keep only typecheck + Biome jobs, remove all desktop/Rust/macOS/Windows jobs).
+2. **Re-delete** `performance-regressions.yml` and `publish.yml` if they reappear.
+3. **Cancel any triggered runs** — the sync push to `main` may trigger workflow runs before the trimmed/deleted files take effect. Go to [Actions](https://github.com/oaris-dev/Cap/actions), find any in-progress runs from the sync commit, and cancel them manually to avoid wasting CI minutes and noisy failure notifications.
+
 ## Workflows We Keep
 
 | Workflow | File | Notes |
