@@ -34,7 +34,58 @@ After every upstream sync:
 | Test Self-Hosting | `test-self-hosting.yml` | Validates Docker Compose setup |
 | Validate Migrations | `validate-migration-journal.yml` | PR-only, lightweight |
 | Cleanup Actions Caches | `cleanup-caches.yml` | **Do not delete.** Weekly prune of Docker build caches to stay under 2 GB free tier |
+| Docker Build Proposal | `docker-build-proposal.yml` | Builds upstream-PR-proposal images from `proposal/**` branches. See "Upstream Proposal Workflow" below |
 | OpenCode | `opencode.yml` | AI coding via issue comments |
+
+## Upstream Proposal Workflow
+
+When validating a fix we plan to submit upstream, we test it against a **clean upstream baseline** (not our oaris fork) on a separate environment.
+
+**Architecture:**
+
+```
+upstream/main ──> proposal/<name>  (upstream + minimal proposal patch)
+                       │
+                       └──> ghcr.io/oaris-dev/cap-web:proposal-<name>
+                              │
+                              └──> cap-proposal.echo.oaris.de (Coolify)
+```
+
+**Decisions:**
+- DB: separate from staging
+- S3: shared with staging (test data is fine to mix)
+- Image tag: per-branch `:proposal-<branch-suffix>` (multiple proposals can coexist)
+- CI trigger: push to `proposal/**` only (no manual dispatch)
+
+**Creating a proposal branch:**
+
+```bash
+# 1. Make sure upstream is fetched
+git fetch upstream main
+
+# 2. Branch from upstream/main (NOT from our oaris/* branches)
+git checkout -b proposal/<descriptive-name> upstream/main
+
+# 3. Cherry-pick the proposal build workflow file from oaris/deploy
+#    (the workflow file must exist on the proposal branch for CI to trigger)
+git checkout oaris/deploy -- .github/workflows/docker-build-proposal.yml
+git commit -m "ci: add proposal build workflow"
+
+# 4. Apply the proposal patch (the actual fix you want to propose upstream)
+# ... edit files, commit ...
+
+# 5. Push to trigger CI build
+git push origin proposal/<descriptive-name>
+```
+
+CI will publish `ghcr.io/oaris-dev/cap-web:proposal-<descriptive-name>`. Update the Coolify service to pull that tag, then validate the fix on `cap-proposal.echo.oaris.de`.
+
+**Cleanup after PR is merged or closed:**
+
+```bash
+git push origin --delete proposal/<descriptive-name>
+# Also delete the GHCR image if you want
+```
 
 ## Reference
 
