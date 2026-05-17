@@ -177,7 +177,7 @@ Run this checklist after the rebase and before pushing `oaris/staging`. Every it
 - [ ] **oEmbed endpoint** — file: `apps/web/app/api/oembed/route.ts`. Verify: `ls apps/web/app/api/oembed/route.ts && grep -n "application/json+oembed" apps/web/app/api/oembed/route.ts`. Smoke test: `curl 'https://<staging-host>/api/oembed?url=<share-url>'` returns an oEmbed JSON payload.
 - [ ] **Sandbox-safe embeds (JWT + origin auth)** — files: `apps/web/lib/embed-token.ts` (server-only), `apps/web/lib/embed-token-shared.ts` (client-safe), patches in `apps/web/proxy.ts`. Verify: `ls apps/web/lib/embed-token*.ts && grep -n "verifyEmbedToken\|embed-token" apps/web/proxy.ts`. Smoke test: embed a password-protected video on a trusted origin (listed in `ALLOWED_EMBED_ORIGINS`) inside a sandboxed iframe; it should play without re-prompting for the password.
 - [ ] **`ALLOWED_EMBED_ORIGINS` env var** — defined in `packages/env/server.ts`. Verify: `grep -n "ALLOWED_EMBED_ORIGINS" packages/env/server.ts`.
-- [ ] **i18n translations for share/embed pages** — file: `apps/web/lib/translations.ts` plus runtime-data-attribute plumbing. Verify: `ls apps/web/lib/translations.ts && grep -rn "translations" apps/web/app/s/ apps/web/app/embed/ | head`.
+- [ ] **i18n translations for share/embed pages** — file: `apps/web/lib/translations.ts` plus runtime-data-attribute plumbing; build-time env `NEXT_PUBLIC_UI_LANGUAGE` in `packages/env/build.ts`. Verify: `ls apps/web/lib/translations.ts && grep -rn "translations" apps/web/app/s/ apps/web/app/embed/ | head && grep -n "NEXT_PUBLIC_UI_LANGUAGE" packages/env/build.ts`.
 - [ ] **AI skeleton loading UX fix** — small patch in the share-page AI summary component. Verify by viewing a freshly uploaded video without any AI keys set — the AI summary skeleton should not spin indefinitely.
 
 ### Critical infrastructure patches
@@ -204,7 +204,7 @@ Run this checklist after the rebase and before pushing `oaris/staging`. Every it
 
 - [ ] **`pnpm-lock.yaml` regenerated if any `package.json` changed** — covered in Phase 4 above. Skipping causes `ERR_PNPM_OUTDATED_LOCKFILE` in Docker builds.
 - [ ] **`packages/env/server.ts` env additions intact** — verify: `grep -n "ALLOWED_EMBED_ORIGINS\|DEEPGRAM_API_URL\|MISTRAL_API_KEY\|MISTRAL_API_URL\|AI_RESPONSE_LANGUAGE" packages/env/server.ts`.
-- [ ] **`packages/env/build.ts` env additions intact** — TODO(PM): confirm whether we currently have any oaris-specific additions in `build.ts` or only in `server.ts`. The brief lists both, but only `server.ts` shows oaris-specific entries on current `oaris/deploy` (`grep -n "OARIS\|oaris" packages/env/build.ts` returns nothing). Either drop `build.ts` from the checklist, or document the entry that needs preserving.
+- [ ] **`packages/env/build.ts` `NEXT_PUBLIC_UI_LANGUAGE` addition** — verify: `grep -n "NEXT_PUBLIC_UI_LANGUAGE" packages/env/build.ts` returns matches in both the schema and `runtimeEnv` blocks. Powers the i18n UI-language default for share/embed pages.
 
 ---
 
