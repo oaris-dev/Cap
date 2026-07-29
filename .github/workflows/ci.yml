@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+      - oaris/staging
       - oaris/deploy
   pull_request:
   workflow_dispatch:

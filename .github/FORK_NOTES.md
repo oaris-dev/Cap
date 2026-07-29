@@ -69,24 +69,57 @@ git push origin main
 
 If the fast-forward fails, something committed to `main` directly — stop and investigate before continuing. `main` must remain a strict mirror of upstream.
 
-### Phase 3 — Rebase `oaris/staging` on `main` first
+### Phase 3 — Merge `main` into `oaris/staging` first
 
-Sync always lands on `oaris/staging` first. **Never rebase `oaris/deploy` directly against `main`.**
+Sync always lands on `oaris/staging` first. **Never sync `oaris/deploy` directly against `main`.**
 
 ```bash
 git checkout oaris/staging
 git pull --ff-only
-git rebase main
+git merge main
 ```
 
-Expect conflicts. Resolve them with the "Common conflict files" guide below. After each conflict resolution:
+**Merge, do not rebase.** A rebase replays every fork commit onto the new base, so the same files conflict repeatedly — the v0.4.87 sync would have replayed **98 fork commits** across 2,596 upstream commits. The merge resolved **27 files exactly once**. Merge is also what the fork has actually done in practice for several syncs.
+
+Expect conflicts. Resolve them with the "Common conflict files" guide below, then:
 
 ```bash
 git add <resolved files>
-git rebase --continue
+git commit
 ```
 
-When the rebase completes, run the **Feature-preservation checklist** (below) before pushing anything.
+When the merge completes, run the **Feature-preservation checklist** (below) before pushing anything.
+
+#### Verifying a conflict resolution
+
+A file with no conflict markers is **not** evidence of a correct resolution. Every one of these produced a clean-looking file that was wrong:
+
+| Failure | What it looks like |
+|---|---|
+| **Structural truncation** | The conflict boundary cuts mid-statement. Resolving the visible hunk deletes a `try {` or a function call that lived outside it. No markers remain; the code is malformed. |
+| **Whole-file takeover** | `git checkout --theirs/--ours` silently discards fork deltas elsewhere in the file, nowhere near any conflict. |
+| **Semantic loss in a merged file** | Both sides merge cleanly, but the result drops a provider branch or guard — code still compiles, behaviour silently changes. |
+| **Keyword still matches** | A verification grep hits the keyword somewhere else in the file while the feature is dead at the call site that mattered. |
+
+So, for every non-trivial file:
+
+```bash
+diff <(git show upstream/main:<file>) <file>
+```
+
+The output must contain **only** intended fork deltas — account for every line. For heavily rewritten files, prefer taking upstream's version clean and re-applying fork deltas deliberately, rather than resolving hunk by hunk.
+
+Then still run `pnpm typecheck`. Per-file review missed two structural failures in the v0.4.87 sync that only the compiler caught.
+
+#### Watch for upstream code that does not know about fork providers
+
+Upstream guards features on the providers it ships (Deepgram, Groq, OpenAI). Fork providers are invisible to it, so taking upstream's version verbatim disables them — and the failure is silent, reading as a config problem rather than a sync regression. In the v0.4.87 sync this bit **three** separate guards:
+
+```bash
+grep -rn "MISTRAL_API_KEY" apps/web/lib/generate-ai.ts apps/web/workflows/generate-ai.ts apps/web/actions/videos/get-status.ts
+```
+
+All must include the fork provider alongside upstream's.
 
 ### Phase 4 — Regenerate lockfile if upstream touched any `package.json`
 
@@ -244,12 +277,19 @@ git log --grep="<short SHA from PR>" main
 
 If the search hits a commit on `main` (which now includes the latest upstream), the patch landed — drop our local version during conflict resolution. If it doesn't hit, keep our patch.
 
-Current in-flight upstream PRs (drop the matching local patch when these merge):
+No upstream PRs are currently in flight.
 
-| Upstream PR | Local patch lives in | Drop trigger |
+**Upstream may fix the same bug independently.** Check for that before assuming a fork patch is still needed — a patch can become dead weight without the corresponding PR ever being merged. In the v0.4.87 sync, five fork patches were retired this way:
+
+| Fork patch | Superseded by | Note |
 |---|---|---|
-| [CapSoftware/Cap#1832](https://github.com/CapSoftware/Cap/pull/1832) | Transcription race guard in `apps/web/lib/transcribe.ts` | When merged, drop our `transcribe.ts` guard. |
-| [CapSoftware/Cap#1833](https://github.com/CapSoftware/Cap/pull/1833) | `/.well-known/` allow-list in `apps/web/proxy.ts` | When merged, drop both the path allow-list entry and the matcher exclusion in `proxy.ts`. |
+| Transcription race guard (was PR #1832) | `08990bb90` | Upstream's atomic claim is stronger — conditional `UPDATE ... WHERE transcriptionStatus IS NULL` plus an affected-rows check. |
+| `proxy.ts` `/.well-known/` allow-list (was PR #1833) | `732a4bda5` | — |
+| `proxy.ts` `/embed/` allow-list | `732a4bda5` | Same upstream commit. |
+| Global AI response language env var | `getAiLanguageInstruction` | Upstream's is per-video rather than a global default. |
+| AI skeleton loading fix | condition corrected to `!data.chapters?.length` | Upstream fixed the root cause; the fork had deleted the early return entirely. |
+
+Prefer upstream's version whenever it covers the same ground — fewer fork patches means cheaper future syncs.
 
 For the most up-to-date list of in-flight PRs, see the "Upstream PR Tracker" section of the private ops doc `.oaris/DEPLOYMENT.md` (operator-only).
 
@@ -269,14 +309,38 @@ Check current cache usage at the repo's Actions → Caches view.
 
 ## Disabled Upstream Workflows
 
-When syncing with upstream, **do not re-add** the following workflow files:
+When syncing with upstream, **do not re-add** the following workflow files. Deleted ones resurrect via merge; new upstream ones simply arrive with no conflict at all, so check the directory listing rather than only the conflict list.
 
-| Workflow | File | Reason |
+**Auto-firing — these cost money if they return:**
+
+| Workflow | File | Trigger |
 |---|---|---|
-| Performance Regressions | `performance-regressions.yml` | Weekly cron benchmarking desktop media pipeline on macOS/Windows. Expensive, not relevant to our use case. |
-| Publish | `publish.yml` | Desktop app release pipeline via CrabNebula. We don't publish desktop releases. |
+| publish-nightly | `publish-nightly.yml` | cron daily — desktop nightly builds on macOS/Windows |
+| A/V Sync Tests | `sync-tests.yml` | cron daily — Rust recording-crate tests |
+| Performance Regressions | `performance-regressions.yml` | cron weekly — desktop media pipeline benchmarks |
+| opencode | `opencode.yml` | every issue comment |
 
-If an upstream sync re-introduces these files via merge conflict, resolve by keeping them deleted.
+**Dispatch-only — harmless but dead weight (we don't ship desktop):** `publish.yml`, `desktop-release.yml`, `promote-nightly.yml`, `publish-chrome-extension.yml`.
+
+After every sync, the workflow directory must contain exactly:
+
+```
+ci.yml  cleanup-caches.yml  docker-build-media-server.yml
+docker-build-proposal.yml  docker-build-web.yml
+test-self-hosting.yml  validate-migration-journal.yml
+```
+
+### The default-branch cron trap
+
+GitHub resolves `schedule` and `issue_comment` triggers against the **default branch only**. Since `main` is a pure upstream mirror, it carries upstream's full workflow set — so if `main` is the default branch, upstream's crons run in this fork and bill us, no matter what `oaris/deploy` contains. Deleting workflow files from `oaris/deploy` does not help.
+
+This is not theoretical: `Performance Regressions` ran here on a schedule for 12 minutes before a trim landed. Being a fork did not suppress it.
+
+Two defences, both applied:
+- **The default branch is `oaris/deploy`, not `main`.** Keep it that way.
+- The four auto-firing workflows are **disabled at the repo level** (`gh workflow disable`), which persists even when the files return.
+
+The same mechanism works in reverse: a fork workflow that relies on `schedule` only runs if it exists on the default branch. `cleanup-caches.yml` never fired once while `main` was default.
 
 ---
 
