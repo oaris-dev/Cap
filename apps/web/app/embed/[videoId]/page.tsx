@@ -149,6 +149,7 @@ const videoSelectFields = {
 	height: videos.height,
 	duration: videos.duration,
 	fps: videos.fps,
+	firstViewEmailSentAt: videos.firstViewEmailSentAt,
 	hasPassword: sql`${videos.password} IS NOT NULL`.mapWith(Boolean),
 	sharedOrganization: {
 		organizationId: sharedVideos.organizationId,
@@ -194,43 +195,7 @@ export default async function EmbedVideoPage(
 
 		const [video] = yield* Effect.promise(() =>
 			db()
-				.select({
-					id: videos.id,
-					name: videos.name,
-					ownerId: videos.ownerId,
-					orgId: videos.orgId,
-					settings: videos.settings,
-					createdAt: videos.createdAt,
-					effectiveCreatedAt: videos.effectiveCreatedAt,
-					updatedAt: videos.updatedAt,
-					bucket: videos.bucket,
-					metadata: videos.metadata,
-					public: videos.public,
-					videoStartTime: videos.videoStartTime,
-					audioStartTime: videos.audioStartTime,
-					awsRegion: videos.awsRegion,
-					awsBucket: videos.awsBucket,
-					xStreamInfo: videos.xStreamInfo,
-					jobId: videos.jobId,
-					jobStatus: videos.jobStatus,
-					isScreenshot: videos.isScreenshot,
-					skipProcessing: videos.skipProcessing,
-					transcriptionStatus: videos.transcriptionStatus,
-					source: videos.source,
-					folderId: videos.folderId,
-					width: videos.width,
-					height: videos.height,
-					duration: videos.duration,
-					fps: videos.fps,
-					firstViewEmailSentAt: videos.firstViewEmailSentAt,
-					hasPassword: sql`${videos.password} IS NOT NULL`.mapWith(Boolean),
-					sharedOrganization: {
-						organizationId: sharedVideos.organizationId,
-					},
-					hasActiveUpload: sql`${videoUploads.videoId} IS NOT NULL`.mapWith(
-						Boolean,
-					),
-				})
+				.select(videoSelectFields)
 				.from(videos)
 				.leftJoin(sharedVideos, eq(videos.id, sharedVideos.videoId))
 				.leftJoin(videoUploads, eq(videos.id, videoUploads.videoId))
