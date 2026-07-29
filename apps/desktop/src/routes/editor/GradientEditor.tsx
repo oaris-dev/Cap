@@ -1,5 +1,7 @@
 import { createMemo, createUniqueId, For, Show } from "solid-js";
-import { RgbInput } from "./color-utils";
+import type { OrganizationBrandColorSwatch } from "~/utils/organization-branding";
+import { BrandColorsDropdown } from "./BrandColorsDropdown";
+import { hexToRgb, RgbInput } from "./color-utils";
 import { useEditorContext } from "./context";
 import type { RGBColor } from "./projectConfig";
 import { Slider, Subfield } from "./ui";
@@ -45,7 +47,9 @@ function randomColor(): RGBColor {
 	];
 }
 
-export function GradientEditor() {
+export function GradientEditor(props: {
+	brandColorSwatches: OrganizationBrandColorSwatch[];
+}) {
 	const { project, setProject } = useEditorContext();
 	const filterId = createUniqueId();
 
@@ -60,6 +64,13 @@ export function GradientEditor() {
 
 	const updateGradient = (updates: Partial<GradientSourceFields>) => {
 		setProject("background", "source", updates as Record<string, unknown>);
+	};
+
+	const updateGradientColor = (key: "from" | "to", color: string) => {
+		const rgb = hexToRgb(color);
+		if (!rgb) return;
+		const [r, g, b] = rgb;
+		updateGradient({ [key]: [r, g, b] as RGBColor });
 	};
 
 	const gradientCSS = createMemo(() => {
@@ -120,21 +131,33 @@ export function GradientEditor() {
 					<div class="flex gap-3 items-end">
 						<div class="flex-1 min-w-0">
 							<span class="text-[11px] text-gray-10 mb-1 block">From</span>
-							<RgbInput
-								value={src().from}
-								onChange={(from) => {
-									updateGradient({ from });
-								}}
-							/>
+							<div class="flex flex-col gap-2">
+								<RgbInput
+									value={src().from}
+									onChange={(from) => {
+										updateGradient({ from });
+									}}
+								/>
+								<BrandColorsDropdown
+									swatches={props.brandColorSwatches}
+									onSelect={(color) => updateGradientColor("from", color)}
+								/>
+							</div>
 						</div>
 						<div class="flex-1 min-w-0">
 							<span class="text-[11px] text-gray-10 mb-1 block">To</span>
-							<RgbInput
-								value={src().to}
-								onChange={(to) => {
-									updateGradient({ to });
-								}}
-							/>
+							<div class="flex flex-col gap-2">
+								<RgbInput
+									value={src().to}
+									onChange={(to) => {
+										updateGradient({ to });
+									}}
+								/>
+								<BrandColorsDropdown
+									swatches={props.brandColorSwatches}
+									onSelect={(color) => updateGradientColor("to", color)}
+								/>
+							</div>
 						</div>
 					</div>
 
@@ -202,7 +225,7 @@ export function GradientEditor() {
 					<div class="flex flex-wrap gap-2">
 						<button
 							type="button"
-							class="flex items-center justify-center rounded-lg transition-all duration-200 cursor-pointer size-8 hover:opacity-80 hover:scale-105 border border-dashed border-gray-8 bg-gray-2 text-gray-10"
+							class="flex items-center justify-center rounded-lg transition-all duration-200 size-8 hover:opacity-80 hover:scale-105 border border-dashed border-gray-8 bg-gray-2 text-gray-10"
 							onClick={() => {
 								updateGradient({
 									from: randomColor(),
@@ -233,7 +256,7 @@ export function GradientEditor() {
 							{(gradient) => (
 								<button
 									type="button"
-									class="rounded-lg transition-all duration-200 cursor-pointer size-8 hover:opacity-80 hover:scale-105 ring-offset-2 ring-offset-gray-200"
+									class="rounded-lg transition-all duration-200 size-8 hover:opacity-80 hover:scale-105 ring-offset-2 ring-offset-gray-200"
 									classList={{
 										"ring-2 ring-gray-500":
 											src().from[0] === gradient.from[0] &&

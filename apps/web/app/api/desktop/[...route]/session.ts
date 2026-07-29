@@ -1,11 +1,11 @@
 import { db } from "@cap/database";
+import { decodeSessionToken } from "@cap/database/auth/auth-options";
 import { getCurrentUser } from "@cap/database/auth/session";
 import { authApiKeys } from "@cap/database/schema";
 import { serverEnv } from "@cap/env";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
-import { decode } from "next-auth/jwt";
 import { z } from "zod";
 
 export const app = new Hono();
@@ -175,7 +175,7 @@ app.get(
 			const token = getCookie(c, "next-auth.session-token");
 			if (token === undefined) return c.redirect(loginRedirectUrl);
 
-			const decodedToken = await decode({ token, secret });
+			const decodedToken = await decodeSessionToken({ token, secret });
 
 			if (!decodedToken) return c.redirect(loginRedirectUrl);
 
@@ -186,7 +186,9 @@ app.get(
 			};
 		} else {
 			const id = crypto.randomUUID();
-			await db().insert(authApiKeys).values({ id, userId: user.id });
+			await db()
+				.insert(authApiKeys)
+				.values({ id, userId: user.id, source: "desktop" });
 
 			data = { type: "api_key", api_key: id };
 		}

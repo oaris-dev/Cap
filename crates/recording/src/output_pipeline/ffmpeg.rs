@@ -1,16 +1,19 @@
 use crate::{
     SharedPauseState, TaskPool,
-    output_pipeline::{AudioFrame, AudioMuxer, Muxer, VideoFrame, VideoMuxer},
+    output_pipeline::{
+        AudioFrame, AudioMuxer, Muxer, VideoFrame, VideoMuxer, frame_timing_log_threshold_ms,
+    },
 };
 use anyhow::{Context, anyhow};
 use cap_enc_ffmpeg::{
     aac::AACEncoder,
+    dash_audio::{DashAudioSegmentEncoder, DashAudioSegmentEncoderConfig},
     fragmented_audio::{FinishError as FragmentedAudioFinishError, FragmentedAudioFile},
     h264::*,
     ogg::*,
     opus::OpusEncoder,
     segmented_audio::SegmentedAudioEncoder,
-    segmented_stream::{SegmentedVideoEncoder, SegmentedVideoEncoderConfig},
+    segmented_stream::{SegmentCompletedEvent, SegmentedVideoEncoder, SegmentedVideoEncoderConfig},
 };
 use cap_media_info::{AudioInfo, VideoInfo};
 use cap_timestamp::Timestamp;
@@ -203,8 +206,8 @@ impl Muxer for FragmentedAudioMuxer {
         })
     }
 
-    fn finish(&mut self, _: Duration) -> anyhow::Result<anyhow::Result<()>> {
-        match self.encoder.finish() {
+    fn finish(&mut self, timestamp: Duration) -> anyhow::Result<anyhow::Result<()>> {
+        match self.encoder.finish_with_timestamp(timestamp) {
             Ok(result) => Ok(result.map_err(Into::into)),
             Err(FragmentedAudioFinishError::AlreadyFinished) => Ok(Ok(())),
             Err(FragmentedAudioFinishError::WriteTrailerFailed(error)) => Ok(Err(anyhow!(error))),
@@ -579,6 +582,7 @@ impl SegmentedVideoMuxer {
             output_size: self.output_size,
         };
 
+        let slow_threshold_ms = frame_timing_log_threshold_ms(&self.video_config);
         let encoder =
             SegmentedVideoEncoder::init(self.base_path.clone(), self.video_config, encoder_config)?;
         let encoder = Arc::new(Mutex::new(encoder));
@@ -594,7 +598,6 @@ impl SegmentedVideoMuxer {
                 let mut slow_encode_count = 0u32;
                 let mut encode_error_count = 0u32;
                 let mut total_frames = 0u64;
-                const SLOW_THRESHOLD_MS: u128 = 5;
 
                 while let Ok(Some((frame, timestamp))) = video_rx.recv() {
                     let encode_start = std::time::Instant::now();
@@ -612,14 +615,14 @@ impl SegmentedVideoMuxer {
 
                     let encode_elapsed_ms = encode_start.elapsed().as_millis();
 
-                    if encode_elapsed_ms > SLOW_THRESHOLD_MS {
+                    if encode_elapsed_ms > slow_threshold_ms {
                         slow_encode_count += 1;
                         if slow_encode_count <= 5 || slow_encode_count.is_multiple_of(100) {
                             debug!(
                                 elapsed_ms = encode_elapsed_ms,
                                 count = slow_encode_count,
                                 "encoder.queue_frame exceeded {}ms threshold",
-                                SLOW_THRESHOLD_MS
+                                slow_threshold_ms
                             );
                         }
                     }
@@ -716,5 +719,87 @@ impl VideoMuxer for SegmentedVideoMuxer {
 impl AudioMuxer for SegmentedVideoMuxer {
     fn send_audio_frame(&mut self, _frame: AudioFrame, _timestamp: Duration) -> anyhow::Result<()> {
         Ok(())
+    }
+}
+
+pub struct DashSegmentedAudioMuxer {
+    encoder: DashAudioSegmentEncoder,
+    pause: Option<SharedPauseState>,
+}
+
+pub struct DashSegmentedAudioMuxerConfig {
+    pub segment_duration: Duration,
+    pub shared_pause_state: Option<SharedPauseState>,
+    pub segment_tx: Option<std::sync::mpsc::Sender<SegmentCompletedEvent>>,
+}
+
+impl Default for DashSegmentedAudioMuxerConfig {
+    fn default() -> Self {
+        Self {
+            segment_duration: Duration::from_secs(3),
+            shared_pause_state: None,
+            segment_tx: None,
+        }
+    }
+}
+
+impl Muxer for DashSegmentedAudioMuxer {
+    type Config = DashSegmentedAudioMuxerConfig;
+
+    async fn setup(
+        config: Self::Config,
+        output_path: PathBuf,
+        _: Option<VideoInfo>,
+        audio_config: Option<AudioInfo>,
+        _: Arc<AtomicBool>,
+        _: &mut TaskPool,
+    ) -> anyhow::Result<Self>
+    where
+        Self: Sized,
+    {
+        let audio_config =
+            audio_config.ok_or_else(|| anyhow!("No audio configuration provided"))?;
+
+        let mut encoder = DashAudioSegmentEncoder::init(
+            output_path,
+            audio_config,
+            DashAudioSegmentEncoderConfig {
+                segment_duration: config.segment_duration,
+            },
+        )
+        .map_err(|e| anyhow!("Failed to initialize DASH audio segment encoder: {e}"))?;
+
+        if let Some(tx) = config.segment_tx {
+            encoder.set_segment_callback(tx);
+        }
+
+        Ok(Self {
+            encoder,
+            pause: config.shared_pause_state,
+        })
+    }
+
+    fn finish(&mut self, timestamp: Duration) -> anyhow::Result<anyhow::Result<()>> {
+        self.encoder
+            .finish_with_timestamp(timestamp)
+            .map_err(Into::into)
+            .map(|_| Ok(()))
+    }
+}
+
+impl AudioMuxer for DashSegmentedAudioMuxer {
+    fn send_audio_frame(&mut self, frame: AudioFrame, timestamp: Duration) -> anyhow::Result<()> {
+        let adjusted_timestamp = if let Some(pause) = &self.pause {
+            match pause.adjust(timestamp)? {
+                Some(ts) => ts,
+                None => return Ok(()),
+            }
+        } else {
+            timestamp
+        };
+
+        self.encoder
+            .queue_frame(frame.inner, adjusted_timestamp)
+            .map_err(|e| anyhow!("Failed to queue audio frame: {e}"))
     }
 }

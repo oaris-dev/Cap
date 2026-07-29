@@ -1,4 +1,4 @@
-import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { invoke } from "@tauri-apps/api/core";
 import { type } from "@tauri-apps/plugin-os";
 import { createResource, Show } from "solid-js";
 import { createStore } from "solid-js/store";
@@ -8,8 +8,12 @@ import {
 	deriveGeneralSettings,
 	type GeneralSettingsStore,
 } from "~/utils/general-settings";
-import { commands } from "~/utils/tauri";
-import { ToggleSettingItem } from "./Setting";
+import {
+	Section,
+	SectionRows,
+	SettingsPageContent,
+	ToggleSettingItem,
+} from "./Setting";
 
 export default function ExperimentalSettings() {
 	const [store] = createResource(() => generalSettingsStore.get());
@@ -36,54 +40,57 @@ function Inner(props: {
 	) => {
 		console.log(`Handling settings change for ${key}: ${value}`);
 
+		const previousValue = settings[key];
 		setSettings(key as keyof GeneralSettingsStore, value);
-		generalSettingsStore.set({ [key]: value });
-		if (key === "enableNativeCameraPreview") {
-			await commands.setCameraInput(null, true);
-			try {
-				const cameraWindow = await WebviewWindow.getByLabel("camera");
-				await cameraWindow?.close();
-			} catch (error) {
-				console.error("Failed to close camera window", error);
+		try {
+			if (key === "enableNativeCameraPreview") {
+				await invoke("set_native_camera_preview_enabled", { enabled: value });
+				await generalSettingsStore.set({ [key]: value });
+			} else {
+				await generalSettingsStore.set({ [key]: value });
 			}
+		} catch (error) {
+			setSettings(key as keyof GeneralSettingsStore, previousValue);
+			console.error(`Failed to update ${key}`, error);
 		}
 	};
 
 	return (
-		<div class="flex flex-col h-full custom-scroll">
-			<div class="p-4 space-y-4">
-				<div class="flex flex-col pb-4 border-b border-gray-2">
-					<h2 class="text-lg font-medium text-gray-12">
-						Experimental Features
-					</h2>
-					<p class="text-sm text-gray-10">
-						These features are still in development and may not work as
-						expected.
-					</p>
-				</div>
+		<div class="cap-settings-page flex flex-col h-full custom-scroll">
+			<SettingsPageContent>
 				<Show
 					when={props.osType !== "windows"}
 					fallback={
-						<p class="text-sm text-gray-10">
+						<p class="text-xs leading-relaxed text-gray-10 px-1">
 							No experimental features are currently available on this platform.
 						</p>
 					}
 				>
-					<div class="space-y-3">
-						<h3 class="text-sm text-gray-12 w-fit">Preview</h3>
-						<div class="px-3 rounded-xl border divide-y divide-gray-3 border-gray-3 bg-gray-2">
+					<Section title="Preview">
+						<SectionRows>
 							<ToggleSettingItem
 								label="Native camera preview"
-								description="Show the camera preview using a native GPU surface instead of rendering it within the webview. This is not functional on certain Windows systems so your mileage may vary."
+								description="Render the camera preview using a native GPU surface instead of through the webview. Experimental and off by default."
 								value={!!settings.enableNativeCameraPreview}
 								onChange={(value) =>
 									handleChange("enableNativeCameraPreview", value)
 								}
 							/>
-						</div>
-					</div>
+						</SectionRows>
+					</Section>
 				</Show>
-			</div>
+
+				<Section title="Reliability">
+					<SectionRows>
+						<ToggleSettingItem
+							label="Out-of-process muxer"
+							description="Run the fragmented-MP4 muxer in an isolated subprocess so muxer crashes can't take down your recording. Requires the bundled cap-muxer binary."
+							value={!!settings.outOfProcessMuxer}
+							onChange={(value) => handleChange("outOfProcessMuxer", value)}
+						/>
+					</SectionRows>
+				</Section>
+			</SettingsPageContent>
 		</div>
 	);
 }

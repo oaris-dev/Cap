@@ -4,7 +4,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tracing::info;
 
 use crate::create_screenshot;
@@ -44,18 +44,12 @@ pub struct IncompleteRecordingInfo {
 pub async fn find_incomplete_recordings(
     app: AppHandle,
 ) -> Result<Vec<IncompleteRecordingInfo>, String> {
-    let recordings_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("recordings");
-
-    if !recordings_dir.exists() {
-        return Ok(Vec::new());
-    }
+    let recordings_dirs = crate::recordings_locations::known_recordings_dirs(&app);
 
     let result = tokio::task::spawn_blocking(move || {
-        let incomplete_list = RecoveryManager::find_incomplete(&recordings_dir);
+        let incomplete_list = recordings_dirs
+            .iter()
+            .flat_map(|dir| RecoveryManager::find_incomplete(dir));
 
         incomplete_list
             .into_iter()
@@ -76,7 +70,7 @@ pub async fn find_incomplete_recordings(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn recover_recording(_app: AppHandle, project_path: String) -> Result<String, String> {
+pub async fn recover_recording(app: AppHandle, project_path: String) -> Result<String, String> {
     let path = PathBuf::from(&project_path);
 
     let recording = tokio::task::spawn_blocking(move || RecoveryManager::inspect_recording(&path))
@@ -88,7 +82,23 @@ pub async fn recover_recording(_app: AppHandle, project_path: String) -> Result<
         return Err("No recoverable segments found".to_string());
     }
 
-    let recovered = RecoveryManager::recover(&recording).map_err(|e| format!("{e}"))?;
+    let estimated_duration_secs = recording.estimated_duration.as_secs();
+    let recover_start = std::time::Instant::now();
+    let recovered = match RecoveryManager::recover(&recording) {
+        Ok(r) => r,
+        Err(e) => {
+            let reason = format!("{e}");
+            crate::posthog::async_capture_event(
+                &app,
+                crate::posthog::PostHogEvent::RecordingRecoveryFailed {
+                    trigger: "app_startup",
+                    reason: reason.clone(),
+                },
+            );
+            return Err(reason);
+        }
+    };
+    let validation_took_ms = recover_start.elapsed().as_millis() as u64;
 
     let segment_count = match &recovered.meta {
         StudioRecordingMeta::SingleSegment { .. } => 1,
@@ -98,6 +108,16 @@ pub async fn recover_recording(_app: AppHandle, project_path: String) -> Result<
     info!(
         "Recovered recording with {} segments: {}",
         segment_count, project_path
+    );
+
+    crate::posthog::async_capture_event(
+        &app,
+        crate::posthog::PostHogEvent::RecordingRecovered {
+            trigger: "app_startup",
+            recovered_duration_secs: estimated_duration_secs,
+            segments_recovered: segment_count as u32,
+            validation_took_ms,
+        },
     );
 
     let display_output_path = match &recovered.meta {

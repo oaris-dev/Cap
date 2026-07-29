@@ -6,26 +6,55 @@ import {
 	importedVideos,
 	organizationMembers,
 	organizations,
-	s3Buckets,
 	users,
 	videos,
 	videoUploads,
 } from "@cap/database/schema";
+import type { VideoMetadata } from "@cap/database/types";
 import { buildEnv, NODE_ENV, serverEnv } from "@cap/env";
 import { dub, userIsPro } from "@cap/utils";
-import { S3Buckets } from "@cap/web-backend";
+import { Storage } from "@cap/web-backend";
 import { Organisation, Video } from "@cap/web-domain";
 import { zValidator } from "@hono/zod-validator";
-import { and, count, eq, lte, or } from "drizzle-orm";
+import { and, count, eq, lte } from "drizzle-orm";
 import { Effect, Option } from "effect";
 import { Hono } from "hono";
 import { z } from "zod";
+import { invalidateGoogleDriveStorageQuotaCache } from "@/lib/google-drive-storage-quota";
 import { runPromise } from "@/lib/server";
-import { isFromDesktopSemver, UPLOAD_PROGRESS_VERSION } from "@/utils/desktop";
+import { decodeStorageVideo } from "@/lib/video-storage";
+import {
+	GOOGLE_DRIVE_UPLOAD_FEATURE,
+	hasDesktopFeature,
+	isFromDesktopSemver,
+	UPLOAD_PROGRESS_VERSION,
+} from "@/utils/desktop";
 import { stringOrNumberOptional } from "@/utils/zod";
 import { withAuth } from "../../utils";
 
 export const app = new Hono().use(withAuth);
+
+type UserOrganizationSelection = {
+	id: Organisation.OrganisationId;
+	name: string;
+	createdAt: Date;
+};
+
+function mergeUserOrganizationSelections(
+	...rowSets: UserOrganizationSelection[][]
+) {
+	const organizationsById = new Map<string, UserOrganizationSelection>();
+
+	for (const rows of rowSets) {
+		for (const row of rows) {
+			organizationsById.set(row.id, row);
+		}
+	}
+
+	return Array.from(organizationsById.values())
+		.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+		.map(({ createdAt, ...organization }) => organization);
+}
 
 app.get(
 	"/create",
@@ -33,7 +62,11 @@ app.get(
 		"query",
 		z.object({
 			recordingMode: z
-				.union([z.literal("hls"), z.literal("desktopMP4")])
+				.union([
+					z.literal("hls"),
+					z.literal("desktopMP4"),
+					z.literal("desktopSegments"),
+				])
 				.optional(),
 			isScreenshot: z.coerce.boolean().default(false),
 			videoId: z.string().optional(),
@@ -81,11 +114,6 @@ app.get(
 				fps,
 			});
 
-			const [customBucket] = await db()
-				.select()
-				.from(s3Buckets)
-				.where(eq(s3Buckets.ownerId, user.id));
-
 			const date = new Date();
 			const formattedDate = `${date.getDate()} ${date.toLocaleString(
 				"default",
@@ -98,7 +126,27 @@ app.get(
 					.from(videos)
 					.where(eq(videos.id, Video.VideoId.make(videoId)));
 
-				if (video)
+				if (video) {
+					if (video.ownerId !== user.id)
+						return c.json({ error: "forbidden" }, { status: 403 });
+
+					if (isScreenshot || video.isScreenshot) {
+						await db().transaction(async (tx) => {
+							if (isScreenshot && !video.isScreenshot) {
+								await tx
+									.update(videos)
+									.set({ isScreenshot: true })
+									.where(
+										and(eq(videos.id, video.id), eq(videos.ownerId, user.id)),
+									);
+							}
+
+							await tx
+								.delete(videoUploads)
+								.where(eq(videoUploads.videoId, video.id));
+						});
+					}
+
 					return c.json({
 						id: video.id,
 						// All deprecated
@@ -106,29 +154,35 @@ app.get(
 						aws_region: "n/a",
 						aws_bucket: "n/a",
 					});
+				}
 			}
 
-			const userOrganizations = await db()
-				.select({
-					id: organizations.id,
-					name: organizations.name,
-				})
-				.from(organizations)
-				.leftJoin(
-					organizationMembers,
-					eq(organizations.id, organizationMembers.organizationId),
-				)
-				.where(
-					or(
-						// User owns the organization
-						eq(organizations.ownerId, user.id),
-						// User is a member of the organization
-						eq(organizationMembers.userId, user.id),
-					),
-				)
-				// Remove duplicates if user is both owner and member
-				.groupBy(organizations.id, organizations.name)
-				.orderBy(organizations.createdAt);
+			const [ownedOrganizations, memberOrganizations] = await Promise.all([
+				db()
+					.select({
+						id: organizations.id,
+						name: organizations.name,
+						createdAt: organizations.createdAt,
+					})
+					.from(organizations)
+					.where(eq(organizations.ownerId, user.id)),
+				db()
+					.select({
+						id: organizations.id,
+						name: organizations.name,
+						createdAt: organizations.createdAt,
+					})
+					.from(organizationMembers)
+					.innerJoin(
+						organizations,
+						eq(organizations.id, organizationMembers.organizationId),
+					)
+					.where(eq(organizationMembers.userId, user.id)),
+			]);
+			const userOrganizations = mergeUserOrganizationSelections(
+				ownedOrganizations,
+				memberOrganizations,
+			);
 			const userOrgIds = userOrganizations.map((org) => org.id);
 
 			let videoOrgId: Organisation.OrganisationId;
@@ -165,6 +219,32 @@ app.get(
 			const videoName =
 				name ??
 				`Cap ${isScreenshot ? "Screenshot" : "Recording"} - ${formattedDate}`;
+			const metadata: VideoMetadata | undefined = name
+				? { sourceName: name }
+				: undefined;
+			const clientSupportsGoogleDriveUpload = hasDesktopFeature(
+				c.req,
+				GOOGLE_DRIVE_UPLOAD_FEATURE,
+			);
+			const organizationWritable =
+				await Storage.getOrganizationWritableAccess(videoOrgId).pipe(
+					runPromise,
+				);
+			if (
+				!clientSupportsGoogleDriveUpload &&
+				Option.isSome(organizationWritable) &&
+				organizationWritable.value.access.provider === "googleDrive"
+			) {
+				return c.json(
+					{ error: "google_drive_upload_unsupported" },
+					{ status: 426 },
+				);
+			}
+
+			const writable = await (clientSupportsGoogleDriveUpload
+				? Storage.getWritableAccessForUser(user.id, videoOrgId)
+				: Storage.getS3WritableAccessForUser(user.id, videoOrgId)
+			).pipe(runPromise);
 
 			await db()
 				.insert(videos)
@@ -178,14 +258,18 @@ app.get(
 							? { type: "local" as const }
 							: recordingMode === "desktopMP4"
 								? { type: "desktopMP4" as const }
-								: undefined,
+								: recordingMode === "desktopSegments"
+									? { type: "desktopSegments" as const }
+									: undefined,
 					isScreenshot,
-					bucket: customBucket?.id,
+					bucket: Option.getOrNull(writable.bucketId),
+					storageIntegrationId: Option.getOrNull(writable.storageIntegrationId),
 					public: serverEnv().CAP_VIDEOS_DEFAULT_PUBLIC,
 					duration: durationInSecs,
 					width,
 					height,
 					fps,
+					...(metadata ? { metadata } : {}),
 				});
 
 			const clientSupportsUploadProgress = isFromDesktopSemver(
@@ -193,7 +277,7 @@ app.get(
 				UPLOAD_PROGRESS_VERSION,
 			);
 
-			if (clientSupportsUploadProgress)
+			if (clientSupportsUploadProgress && !isScreenshot)
 				await db().insert(videoUploads).values({
 					videoId: idToUse,
 					mode: "singlepart",
@@ -267,9 +351,8 @@ app.delete(
 
 		try {
 			const [result] = await db()
-				.select({ video: videos, bucket: s3Buckets })
+				.select({ video: videos })
 				.from(videos)
-				.leftJoin(s3Buckets, eq(videos.bucket, s3Buckets.id))
 				.where(and(eq(videos.id, videoId), eq(videos.ownerId, user.id)));
 
 			if (!result)
@@ -286,9 +369,8 @@ app.delete(
 				.where(and(eq(videos.id, videoId), eq(videos.ownerId, user.id)));
 
 			await Effect.gen(function* () {
-				const [bucket] = yield* S3Buckets.getBucketAccess(
-					Option.fromNullable(result.bucket?.id),
-				);
+				const video = decodeStorageVideo(result.video);
+				const [bucket] = yield* Storage.getAccessForVideo(video);
 
 				const listedObjects = yield* bucket.listObjects({
 					prefix: `${user.id}/${videoId}/`,
@@ -296,11 +378,14 @@ app.delete(
 
 				if (listedObjects.Contents)
 					yield* bucket.deleteObjects(
-						listedObjects.Contents.map((content: any) => ({
+						listedObjects.Contents.map((content) => ({
 							Key: content.Key,
 						})),
 					);
 			}).pipe(runPromise);
+			await invalidateGoogleDriveStorageQuotaCache(
+				result.video.storageIntegrationId,
+			);
 
 			return c.json(true);
 		} catch (error) {
@@ -338,7 +423,11 @@ app.post(
 
 		try {
 			const [video] = await db()
-				.select({ id: videos.id, upload: videoUploads })
+				.select({
+					id: videos.id,
+					storageIntegrationId: videos.storageIntegrationId,
+					upload: videoUploads,
+				})
 				.from(videos)
 				.where(and(eq(videos.id, videoId), eq(videos.ownerId, user.id)))
 				.leftJoin(videoUploads, eq(videos.id, videoUploads.videoId));
@@ -375,6 +464,11 @@ app.post(
 					total,
 					updatedAt,
 				});
+			}
+			if (uploaded === total) {
+				await invalidateGoogleDriveStorageQuotaCache(
+					video.storageIntegrationId,
+				);
 			}
 
 			return c.json(true);

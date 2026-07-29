@@ -4,22 +4,24 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use specta::Type;
+use std::collections::HashMap;
 use tauri::AppHandle;
 use tracing::{instrument, trace};
 
 use crate::web_api::{AuthedApiError, ManagerExt};
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipartUploadInitiateResponse {
+    pub upload_id: String,
+    pub provider: Option<String>,
+}
+
 #[instrument(skip(app))]
 pub async fn upload_multipart_initiate(
     app: &AppHandle,
     video_id: &str,
-) -> Result<String, AuthedApiError> {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct Response {
-        upload_id: String,
-    }
-
+) -> Result<MultipartUploadInitiateResponse, AuthedApiError> {
     let resp = app
         .authed_api_request("/api/upload/multipart/initiate", |c, url| {
             c.post(url)
@@ -41,10 +43,9 @@ pub async fn upload_multipart_initiate(
         return Err(format!("api/upload_multipart_initiate/{status}: {error_body}").into());
     }
 
-    resp.json::<Response>()
+    resp.json::<MultipartUploadInitiateResponse>()
         .await
         .map_err(|err| format!("api/upload_multipart_initiate/response: {err}").into())
-        .map(|data| data.upload_id)
 }
 
 #[instrument(skip(app, upload_id))]
@@ -188,20 +189,23 @@ pub struct PresignedS3PutRequest {
     pub meta: Option<S3VideoMeta>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedUploadTarget {
+    pub url: String,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
 #[instrument(skip(app))]
 pub async fn upload_signed(
     app: &AppHandle,
     body: PresignedS3PutRequest,
-) -> Result<String, AuthedApiError> {
-    #[derive(Deserialize)]
-    struct Data {
-        url: String,
-    }
-
+) -> Result<SignedUploadTarget, AuthedApiError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Response {
-        presigned_put_data: Data,
+        presigned_put_data: SignedUploadTarget,
     }
 
     let resp = app
@@ -223,7 +227,43 @@ pub async fn upload_signed(
     resp.json::<Response>()
         .await
         .map_err(|err| format!("api/upload_signed/response: {err}").into())
-        .map(|data| data.presigned_put_data.url)
+        .map(|data| data.presigned_put_data)
+}
+
+#[instrument(skip(app))]
+pub async fn upload_signed_batch(
+    app: &AppHandle,
+    video_id: &str,
+    subpaths: &[String],
+) -> Result<std::collections::HashMap<String, String>, AuthedApiError> {
+    #[derive(Deserialize)]
+    struct Response {
+        urls: std::collections::HashMap<String, String>,
+    }
+
+    let resp = app
+        .authed_api_request("/api/upload/signed/batch", |client, url| {
+            client.post(url).json(&serde_json::json!({
+                "videoId": video_id,
+                "subpaths": subpaths,
+            }))
+        })
+        .await
+        .map_err(|err| format!("api/upload_signed_batch/request: {err}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let error_body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<no response body>".to_string());
+        return Err(format!("api/upload_signed_batch/{status}: {error_body}").into());
+    }
+
+    resp.json::<Response>()
+        .await
+        .map_err(|err| format!("api/upload_signed_batch/response: {err}").into())
+        .map(|data| data.urls)
 }
 
 #[instrument(skip(app))]
@@ -257,12 +297,61 @@ pub async fn desktop_video_progress(
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Type, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationBrandColors {
+    pub primary: Option<String>,
+    pub secondary: Option<String>,
+    pub accent: Option<String>,
+    pub background: Option<String>,
+}
+
+fn default_organization_role() -> String {
+    "member".to_string()
+}
+
 #[derive(Serialize, Deserialize, Type, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Organization {
     pub id: String,
     pub name: String,
     pub owner_id: String,
+    #[serde(default = "default_organization_role")]
+    pub role: String,
+    #[serde(default)]
+    pub can_edit_brand: bool,
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    #[serde(default)]
+    pub brand_colors: OrganizationBrandColors,
+}
+
+pub async fn signal_recording_complete(
+    app: &AppHandle,
+    video_id: &str,
+) -> Result<(), AuthedApiError> {
+    let resp = app
+        .authed_api_request("/api/upload/recording-complete", |client, url| {
+            client
+                .post(url)
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({
+                    "videoId": video_id,
+                }))
+        })
+        .await
+        .map_err(|err| format!("api/signal_recording_complete/request: {err}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let error_body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<no response body>".to_string());
+        return Err(format!("api/signal_recording_complete/{status}: {error_body}").into());
+    }
+
+    Ok(())
 }
 
 pub async fn fetch_organizations(app: &AppHandle) -> Result<Vec<Organization>, AuthedApiError> {

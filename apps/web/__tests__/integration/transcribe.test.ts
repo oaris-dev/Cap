@@ -9,7 +9,11 @@ vi.mock("@cap/env", () => ({
 
 const mockStart = vi.hoisted(() => vi.fn());
 const schemaMocks = vi.hoisted(() => ({
-	videos: { id: "id", settings: "settings" },
+	videos: {
+		id: "id",
+		settings: "settings",
+		transcriptionStatus: "transcriptionStatus",
+	},
 	organizations: { id: "id", settings: "settings" },
 	s3Buckets: { id: "id" },
 	videoUploads: { videoId: "videoId", phase: "phase" },
@@ -25,30 +29,32 @@ vi.mock("@/workflows/transcribe", () => ({
 
 let mockQueryResult: unknown[] = [];
 let mockUploadQueryResult: unknown[] = [];
+let mockUpdateResult: unknown = [{ affectedRows: 1 }];
 
 vi.mock("@cap/database", () => ({
 	db: () => ({
 		select: () => ({
-			from: (table: unknown) =>
-				table === schemaMocks.videoUploads
-					? {
-							where: vi.fn().mockReturnValue({
-								limit: vi.fn().mockResolvedValue(mockUploadQueryResult),
-							}),
-						}
-					: {
-							leftJoin: () => ({
-								leftJoin: () => ({
-									where: vi
-										.fn()
-										.mockImplementation(() => Promise.resolve(mockQueryResult)),
-								}),
-							}),
-						},
+			from: (table: unknown) => {
+				if (table === schemaMocks.videoUploads) {
+					return {
+						where: vi.fn().mockReturnValue({
+							limit: vi.fn().mockResolvedValue(mockUploadQueryResult),
+						}),
+					};
+				}
+
+				const query = {
+					leftJoin: vi.fn(() => query),
+					where: vi
+						.fn()
+						.mockImplementation(() => Promise.resolve(mockQueryResult)),
+				};
+				return query;
+			},
 		}),
 		update: () => ({
 			set: () => ({
-				where: vi.fn().mockResolvedValue([]),
+				where: vi.fn().mockResolvedValue(mockUpdateResult),
 			}),
 		}),
 	}),
@@ -62,7 +68,9 @@ vi.mock("@cap/database/schema", () => ({
 }));
 
 vi.mock("drizzle-orm", () => ({
+	and: vi.fn((...conditions) => ({ conditions })),
 	eq: vi.fn((field, value) => ({ field, value })),
+	isNull: vi.fn((field) => ({ field, operator: "isNull" })),
 }));
 
 import type { Video } from "@cap/web-domain";
@@ -74,6 +82,7 @@ describe("transcribeVideo", () => {
 		vi.clearAllMocks();
 		mockQueryResult = [];
 		mockUploadQueryResult = [];
+		mockUpdateResult = [{ affectedRows: 1 }];
 	});
 
 	describe("input validation", () => {
@@ -263,6 +272,30 @@ describe("transcribeVideo", () => {
 			expect(result.message).toContain("in progress");
 			expect(mockStart).not.toHaveBeenCalled();
 		});
+
+		it("returns early when transcription failed until manual retry resets it", async () => {
+			mockQueryResult = [
+				{
+					video: {
+						id: "video-123",
+						transcriptionStatus: "ERROR",
+						settings: null,
+					},
+					bucket: null,
+					settings: null,
+					orgSettings: null,
+				},
+			];
+
+			const result = await transcribeVideo(
+				"video-123" as Video.VideoId,
+				"user-456",
+			);
+
+			expect(result.success).toBe(true);
+			expect(result.message).toContain("in progress");
+			expect(mockStart).not.toHaveBeenCalled();
+		});
 	});
 
 	describe("workflow triggering", () => {
@@ -304,6 +337,19 @@ describe("transcribeVideo", () => {
 			expect(result.success).toBe(true);
 			expect(result.message).toBe("Transcription workflow started");
 			expect(mockStart).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not trigger workflow when another request claimed transcription first", async () => {
+			mockUpdateResult = [{ affectedRows: 0 }];
+
+			const result = await transcribeVideo(
+				"video-123" as Video.VideoId,
+				"user-456",
+			);
+
+			expect(result.success).toBe(true);
+			expect(result.message).toContain("in progress");
+			expect(mockStart).not.toHaveBeenCalled();
 		});
 
 		it("passes correct payload to workflow", async () => {

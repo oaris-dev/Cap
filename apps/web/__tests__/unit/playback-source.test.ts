@@ -32,7 +32,7 @@ function createResponse(
 }
 
 describe("detectCrossOriginSupport", () => {
-	it("disables cross-origin for S3 and R2 URLs", () => {
+	it("disables cross-origin for S3 and R2 URLs when not redirected", () => {
 		expect(
 			detectCrossOriginSupport(
 				"https://cap-assets.r2.cloudflarestorage.com/video.mp4",
@@ -44,6 +44,30 @@ describe("detectCrossOriginSupport", () => {
 			),
 		).toBe(false);
 		expect(detectCrossOriginSupport("/api/playlist?videoType=mp4")).toBe(true);
+	});
+
+	it("enables cross-origin for S3/R2 URLs when probe was redirected", () => {
+		expect(
+			detectCrossOriginSupport(
+				"https://cap-assets.r2.cloudflarestorage.com/video.mp4",
+				true,
+			),
+		).toBe(true);
+		expect(
+			detectCrossOriginSupport(
+				"https://bucket.s3.eu-west-2.amazonaws.com/video.mp4",
+				true,
+			),
+		).toBe(true);
+	});
+
+	it("falls back to hostname heuristic when not redirected", () => {
+		expect(
+			detectCrossOriginSupport(
+				"https://cap-assets.r2.cloudflarestorage.com/video.mp4",
+				false,
+			),
+		).toBe(false);
 	});
 });
 
@@ -103,7 +127,7 @@ describe("resolvePlaybackSource", () => {
 		expect(result).toEqual({
 			url: "https://bucket.s3.amazonaws.com/result.mp4",
 			type: "mp4",
-			supportsCrossOrigin: false,
+			supportsCrossOrigin: true,
 		});
 	});
 
@@ -211,7 +235,34 @@ describe("resolvePlaybackSource", () => {
 		expect(result).toBeNull();
 	});
 
-	it("falls back after MP4 network errors and returns null when no source works", async () => {
+	it("uses a same-origin MP4 source when the probe is blocked after redirect", async () => {
+		const fetchImpl = vi
+			.fn<typeof fetch>()
+			.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+		const result = await resolvePlaybackSource({
+			videoSrc: "/api/playlist?videoType=mp4",
+			rawFallbackSrc: "/api/playlist?videoType=raw-preview",
+			enableCrossOrigin: true,
+			fetchImpl,
+			now: () => 350,
+		});
+
+		expect(fetchImpl).toHaveBeenCalledTimes(1);
+		expect(fetchImpl).toHaveBeenCalledWith(
+			"/api/playlist?videoType=mp4&_t=350",
+			{
+				headers: { range: "bytes=0-0" },
+			},
+		);
+		expect(result).toEqual({
+			url: "/api/playlist?videoType=mp4&_t=350",
+			type: "mp4",
+			supportsCrossOrigin: false,
+		});
+	});
+
+	it("falls back after absolute MP4 network errors and returns null when no source works", async () => {
 		const fetchImpl = vi
 			.fn<typeof fetch>()
 			.mockRejectedValueOnce(new Error("network"))
@@ -222,7 +273,7 @@ describe("resolvePlaybackSource", () => {
 			);
 
 		const result = await resolvePlaybackSource({
-			videoSrc: "/api/playlist?videoType=mp4",
+			videoSrc: "https://cap.so/api/playlist?videoType=mp4",
 			rawFallbackSrc: "/api/playlist?videoType=raw-preview",
 			fetchImpl,
 			now: () => 400,

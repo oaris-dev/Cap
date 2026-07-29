@@ -7,7 +7,6 @@ import {
 	MenuItem,
 	PredefinedMenuItem,
 } from "@tauri-apps/api/menu";
-import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as dialog from "@tauri-apps/plugin-dialog";
 import { type as ostype } from "@tauri-apps/plugin-os";
@@ -25,6 +24,7 @@ import {
 import { createStore, produce } from "solid-js/store";
 import { TransitionGroup } from "solid-transition-group";
 import { authStore } from "~/store";
+import { getCameraWindow } from "~/utils/camera-window";
 import { createTauriEventListener } from "~/utils/createEventListener";
 import {
 	createCurrentRecordingQuery,
@@ -82,6 +82,14 @@ function InProgressRecordingInner() {
 	);
 	const [start, setStart] = createSignal(Date.now());
 	const [time, setTime] = createSignal(Date.now());
+	// When we last entered the "stopped" state. The reconcile effect compares
+	// this against the recording query's dataUpdatedAt so a refetch that is
+	// still in flight when a stop completes can't resurrect the old recording.
+	let stoppedAt = 0;
+	const markStopped = () => {
+		stoppedAt = Date.now();
+		setState({ variant: "stopped" });
+	};
 	const currentRecording = createCurrentRecordingQuery();
 	const optionsQuery = createOptionsQuery();
 	const startedWithMicrophone = optionsQuery.rawOptions.micName != null;
@@ -108,10 +116,18 @@ function InProgressRecordingInner() {
 	const [issueKey, setIssueKey] = createSignal("");
 	const [cameraWindowOpen, setCameraWindowOpen] = createSignal(false);
 	const [startingDismissed, setStartingDismissed] = createSignal(false);
+	const [stopRequested, setStopRequested] = createSignal(false);
+	const [teardownInFlight, setTeardownInFlight] = createSignal(false);
+	// Mirrors the backend's recording-scoped mic mute. The backend flag lives
+	// on the per-recording microphone lock, so every new recording starts
+	// unmuted — this signal must be reset wherever a new session begins.
+	const [micMuted, setMicMuted] = createSignal(false);
 	const [interactiveAreaRef, setInteractiveAreaRef] =
 		createSignal<HTMLDivElement | null>(null);
 	let settingsButtonRef: HTMLButtonElement | undefined;
 	let lastInteractiveBoundsKey = "";
+	let pendingInteractiveBoundsKey = "";
+	let interactiveBoundsDisposed = false;
 	const recordingMode = createMemo(
 		() => currentRecording.data?.mode ?? optionsQuery.rawOptions.mode,
 	);
@@ -189,6 +205,8 @@ function InProgressRecordingInner() {
 				setRecordingFailure(null);
 				setDegradedReason(null);
 				setPauseResumes([]);
+				setStopRequested(false);
+				setMicMuted(false);
 				setState({
 					variant: "countdown",
 					from: payload.value,
@@ -202,9 +220,17 @@ function InProgressRecordingInner() {
 				setRecordingFailure(null);
 				setDegradedReason(null);
 				setPauseResumes([]);
-				setState({ variant: "recording" });
+				setStopRequested(false);
+				setMicMuted(false);
+				aborted = false;
+				// This window is reused across recordings, so `start`/`time` still
+				// hold the previous session's values here. Effects (the free-plan
+				// length limit) run synchronously on the state flip below, so the
+				// timestamps must be reset first or the new recording gets measured
+				// against the old session and stopped immediately.
 				setStart(Date.now());
 				setTime(Date.now());
+				setState({ variant: "recording" });
 				if (wasStartingDismissed) {
 					void getCurrentWindow().show();
 				}
@@ -248,25 +274,78 @@ function InProgressRecordingInner() {
 		}
 	});
 
+	// A recording can end outside this window: the main window's stop button,
+	// the tray, a global shortcut, or a mid-recording failure. The switch above
+	// never resets state for those (RecordingEvent::Stopped exists but comes
+	// from a racing wait-actor and can land mid-restart, so it is deliberately
+	// not handled). RecordingStopped is only emitted after the recording state
+	// clears and strictly before any next recording can start, making it the
+	// safe reset signal — without it this reused window keeps ticking a phantom
+	// session that poisons the next recording's elapsed-time checks.
+	createTauriEventListener(events.recordingStopped, () => {
+		// Restart/delete drive their own state while the discarded recording
+		// tears down; the stop mutation marks stopped itself once it resolves.
+		if (teardownInFlight()) return;
+		markStopped();
+	});
+
 	createEffect(() => {
+		// While restart/delete teardown is running the query data is stale;
+		// reconciling against it would resurrect the discarded recording's state.
+		if (teardownInFlight()) return;
+
 		const s = state();
 		const recording = currentRecording.data as
 			| CurrentRecording
 			| null
 			| undefined;
+
+		if (s.variant === "stopped" && !currentRecording.isPending && recording) {
+			// Only trust data fetched after we entered "stopped". The stop
+			// command resolves before the invalidated query can refetch (the
+			// backend holds the recording state lock until the command returns),
+			// so `data` here can still describe the recording that just ended.
+			// Resurrecting from it would leave this reused window in a phantom
+			// "recording" state, with the timer running against a dead session.
+			// (dataUpdatedAt marks fetch resolution, not the snapshot, so a
+			// fetch dispatched pre-stop can slip through — the fresh start/time
+			// set below keeps even that phantom harmless to the next session.)
+			if (currentRecording.dataUpdatedAt <= stoppedAt) return;
+			setStartingDismissed(false);
+			setDisconnectedInputs({ microphone: false, camera: false });
+			setRecordingFailure(null);
+			setDegradedReason(null);
+			setPauseResumes([]);
+			setStopRequested(false);
+			setMicMuted(false);
+			aborted = false;
+			if (recording.status === "recording") {
+				setStart(Date.now());
+				setTime(Date.now());
+				setState({ variant: "recording" });
+			} else {
+				setState({ variant: "initializing" });
+			}
+			return;
+		}
+
 		if (s.variant !== "initializing" && s.variant !== "countdown") return;
 		if (currentRecording.isPending) return;
 		if (recording?.status === "recording") {
 			setStartingDismissed(false);
 			setDisconnectedInputs({ microphone: false, camera: false });
 			setRecordingFailure(null);
-			setState({ variant: "recording" });
+			setDegradedReason(null);
+			setPauseResumes([]);
+			setMicMuted(false);
+			aborted = false;
 			setStart(Date.now());
 			setTime(Date.now());
+			setState({ variant: "recording" });
 			return;
 		}
 		if (s.variant === "initializing" && !recording) {
-			setState({ variant: "stopped" });
+			markStopped();
 			void getCurrentWindow().hide();
 		}
 	});
@@ -292,10 +371,13 @@ function InProgressRecordingInner() {
 	});
 
 	const syncInteractiveAreaBounds = () => {
+		if (interactiveBoundsDisposed) return;
+
 		const element = interactiveAreaRef();
 		if (!element) {
 			if (lastInteractiveBoundsKey !== "") {
 				lastInteractiveBoundsKey = "";
+				pendingInteractiveBoundsKey = "";
 				void commands.removeFakeWindow(FAKE_WINDOW_BOUNDS_NAME);
 			}
 			return;
@@ -308,12 +390,30 @@ function InProgressRecordingInner() {
 			.map((value) => value.toFixed(2))
 			.join(":");
 		if (key === lastInteractiveBoundsKey) return;
+		if (pendingInteractiveBoundsKey !== "") return;
 
-		lastInteractiveBoundsKey = key;
-		void commands.setFakeWindowBounds(FAKE_WINDOW_BOUNDS_NAME, {
+		pendingInteractiveBoundsKey = key;
+		const bounds = {
 			position: { x: rect.left, y: rect.top },
 			size: { width: rect.width, height: rect.height },
-		});
+		};
+		void commands
+			.setFakeWindowBounds(FAKE_WINDOW_BOUNDS_NAME, bounds)
+			.then(() => {
+				if (interactiveBoundsDisposed) {
+					void commands.removeFakeWindow(FAKE_WINDOW_BOUNDS_NAME);
+					return;
+				}
+
+				lastInteractiveBoundsKey = key;
+			})
+			.catch((error) => {
+				console.error("Failed to sync recording controls hit area", error);
+			})
+			.finally(() => {
+				if (pendingInteractiveBoundsKey === key)
+					pendingInteractiveBoundsKey = "";
+			});
 	};
 
 	createEffect(() => {
@@ -328,7 +428,9 @@ function InProgressRecordingInner() {
 	});
 
 	onCleanup(() => {
+		interactiveBoundsDisposed = true;
 		lastInteractiveBoundsKey = "";
+		pendingInteractiveBoundsKey = "";
 		void commands.removeFakeWindow(FAKE_WINDOW_BOUNDS_NAME);
 	});
 
@@ -361,10 +463,20 @@ function InProgressRecordingInner() {
 
 	const stopRecording = createMutation(() => ({
 		mutationFn: async () => {
-			setState({ variant: "stopped" });
+			setStopRequested(true);
 			await commands.stopRecording();
+			markStopped();
+			void getCurrentWindow().hide();
+		},
+		onError: () => {
+			setStopRequested(false);
 		},
 	}));
+
+	const requestStopRecording = () => {
+		if (isCountdown() || stopRequested() || stopRecording.isPending) return;
+		stopRecording.mutate();
+	};
 
 	const togglePause = createMutation(() => ({
 		mutationFn: async () => {
@@ -372,6 +484,31 @@ function InProgressRecordingInner() {
 				await commands.resumeRecording();
 			} else {
 				await commands.pauseRecording();
+			}
+		},
+	}));
+
+	// Muting zeroes the mic samples backend-side while the stream keeps its
+	// normal cadence, so the recording timeline is unaffected. Only exposed for
+	// instant mode: studio records the mic as an editable track, where muted
+	// spans would silently bake zeros into it.
+	const canToggleMicMute = createMemo(
+		() =>
+			recordingMode() === "instant" &&
+			optionsQuery.rawOptions.micName != null &&
+			!disconnectedInputs.microphone &&
+			(state().variant === "recording" || state().variant === "paused"),
+	);
+
+	const toggleMicMute = createMutation(() => ({
+		mutationFn: async () => {
+			const next = !micMuted();
+			setMicMuted(next);
+			try {
+				await commands.setMicRecordingMuted(next);
+			} catch (error) {
+				setMicMuted(!next);
+				throw error;
 			}
 		},
 	}));
@@ -385,10 +522,13 @@ function InProgressRecordingInner() {
 
 			if (!shouldRestart) return;
 
-			await handleRecordingResult(commands.restartRecording(), undefined);
-
-			setState({ variant: "recording" });
-			setTime(Date.now());
+			setTeardownInFlight(true);
+			setState({ variant: "initializing" });
+			try {
+				await handleRecordingResult(commands.restartRecording(), undefined);
+			} finally {
+				setTeardownInFlight(false);
+			}
 		},
 	}));
 
@@ -401,16 +541,21 @@ function InProgressRecordingInner() {
 
 			if (!shouldDelete) return;
 
-			await commands.deleteRecording();
-
-			setState({ variant: "stopped" });
+			setTeardownInFlight(true);
+			markStopped();
+			void getCurrentWindow().hide();
+			try {
+				await commands.deleteRecording();
+			} finally {
+				setTeardownInFlight(false);
+			}
 		},
 	}));
 
 	const toggleCameraPreview = createMutation(() => ({
 		mutationFn: async () => {
 			if (cameraWindowOpen()) {
-				const cameraWindow = await WebviewWindow.getByLabel("camera");
+				const cameraWindow = await getCameraWindow();
 				if (cameraWindow) await cameraWindow.close();
 			} else {
 				await commands.showWindow({ Camera: { centered: false } });
@@ -454,7 +599,7 @@ function InProgressRecordingInner() {
 			try {
 				await commands.setCameraInput(next, null);
 				if (!next && cameraWindowOpen()) {
-					const cameraWindow = await WebviewWindow.getByLabel("camera");
+					const cameraWindow = await getCameraWindow();
 					if (cameraWindow) await cameraWindow.close();
 					await refreshCameraWindowState();
 				}
@@ -584,6 +729,11 @@ function InProgressRecordingInner() {
 
 	let aborted = false;
 	createEffect(() => {
+		// Only a live session may trip the limit; in the other variants
+		// `time`/`start` are leftovers from a previous recording in this
+		// reused window and must never trigger a stop.
+		const variant = state().variant;
+		if (variant !== "recording" && variant !== "paused") return;
 		if (
 			isMaxRecordingLimitEnabled() &&
 			adjustedTime() > MAX_RECORDING_FOR_FREE &&
@@ -602,7 +752,7 @@ function InProgressRecordingInner() {
 	const isInitializing = () => state().variant === "initializing";
 	const closeStartingBar = async () => {
 		setStartingDismissed(true);
-		setState({ variant: "stopped" });
+		markStopped();
 		await getCurrentWindow().hide();
 	};
 	const isCountdown = () => state().variant === "countdown";
@@ -633,30 +783,40 @@ function InProgressRecordingInner() {
 					</div>
 				</Show>
 				<div class="h-10 w-full rounded-2xl">
-					<div class="flex h-full w-full flex-row items-stretch overflow-hidden rounded-2xl bg-gray-1 border border-gray-5 shadow-[0_1px_3px_rgba(0,0,0,0.1)] animate-in fade-in">
-						<div class="flex flex-1 flex-col gap-2 p-[0.25rem]">
+					<div class="flex h-full w-full flex-row items-stretch overflow-hidden rounded-2xl bg-gray-1 border border-gray-5 shadow-[0_1px_3px_rgba(0,0,0,0.1)]">
+						<div class="flex flex-1 flex-col gap-2 p-1">
 							<div class="flex flex-1 flex-row justify-between">
 								<Show
 									when={!isInitializing()}
 									fallback={
-										<div class="flex flex-row items-center gap-[0.375rem] rounded-lg py-[0.25rem] px-[0.5rem] text-gray-12">
+										<div class="flex flex-row items-center gap-1.5 rounded-lg py-1 px-2 text-gray-12">
 											<IconLucideLoader2 class="size-4 animate-spin" />
-											<span class="text-[0.875rem] font-[500] tabular-nums">
+											<span class="text-[0.875rem] font-medium tabular-nums">
 												Starting
 											</span>
 										</div>
 									}
 								>
 									<button
-										disabled={stopRecording.isPending || isCountdown()}
-										class="flex flex-row items-center gap-[0.25rem] rounded-lg py-[0.25rem] px-[0.5rem] text-red-300 transition-colors duration-100 hover:bg-red-500/[0.08] active:bg-red-500/[0.12] disabled:opacity-60 disabled:hover:bg-transparent"
+										disabled={
+											stopRequested() ||
+											stopRecording.isPending ||
+											isCountdown()
+										}
+										class="flex flex-row items-center gap-1 rounded-lg py-1 px-2 text-red-300 transition-colors duration-100 hover:bg-red-500/8 active:bg-red-500/12 disabled:opacity-60 disabled:hover:bg-transparent"
 										type="button"
-										onClick={() => stopRecording.mutate()}
+										onPointerDown={(event) => {
+											if (event.button !== 0) return;
+											event.preventDefault();
+											event.stopPropagation();
+											requestStopRecording();
+										}}
+										onClick={requestStopRecording}
 										title="Stop recording"
 										aria-label="Stop recording"
 									>
 										<IconCapStopCircle />
-										<span class="text-[0.875rem] font-[500] tabular-nums">
+										<span class="text-[0.875rem] font-medium tabular-nums">
 											<Show
 												when={!isCountdown()}
 												fallback={
@@ -718,13 +878,55 @@ function InProgressRecordingInner() {
 								</Show>
 
 								<div class="flex items-center gap-1">
-									<div
-										class="relative flex h-8 w-8 items-center justify-center"
-										title={microphoneTitle()}
+									<Show
+										when={canToggleMicMute()}
+										fallback={
+											<div
+												class="relative flex h-8 w-8 items-center justify-center"
+												title={microphoneTitle()}
+											>
+												{optionsQuery.rawOptions.micName != null ? (
+													disconnectedInputs.microphone ? (
+														<IconLucideMicOff class="size-5 text-amber-11" />
+													) : (
+														<>
+															<IconCapMicrophone class="size-5 text-gray-12" />
+															<div class="absolute bottom-1 left-1 right-1 h-0.5 overflow-hidden rounded-full bg-gray-10">
+																<div
+																	class="absolute inset-0 bg-blue-9 transition-transform duration-100"
+																	style={{
+																		transform: `translateX(-${
+																			(1 - audioLevel()) * 100
+																		}%)`,
+																	}}
+																/>
+															</div>
+														</>
+													)
+												) : (
+													<IconLucideMicOff
+														class="size-5 text-gray-7"
+														data-tauri-drag-region
+													/>
+												)}
+											</div>
+										}
 									>
-										{optionsQuery.rawOptions.micName != null ? (
-											disconnectedInputs.microphone ? (
-												<IconLucideMicOff class="size-5 text-amber-11" />
+										<button
+											type="button"
+											class="relative flex h-8 w-8 items-center justify-center rounded-lg transition-colors duration-100 hover:bg-gray-12/6 active:bg-gray-12/10 disabled:opacity-50 disabled:hover:bg-transparent dark:hover:bg-white/8 dark:active:bg-white/12"
+											disabled={toggleMicMute.isPending}
+											onClick={() => toggleMicMute.mutate()}
+											title={
+												micMuted() ? "Unmute microphone" : "Mute microphone"
+											}
+											aria-pressed={micMuted() ? "true" : "false"}
+											aria-label={
+												micMuted() ? "Unmute microphone" : "Mute microphone"
+											}
+										>
+											{micMuted() ? (
+												<IconLucideMicOff class="size-5 text-red-9" />
 											) : (
 												<>
 													<IconCapMicrophone class="size-5 text-gray-12" />
@@ -739,14 +941,9 @@ function InProgressRecordingInner() {
 														/>
 													</div>
 												</>
-											)
-										) : (
-											<IconLucideMicOff
-												class="size-5 text-gray-7"
-												data-tauri-drag-region
-											/>
-										)}
-									</div>
+											)}
+										</button>
+									</Show>
 									<Show when={hasCameraInput() && disconnectedInputs.camera}>
 										<div
 											class="flex h-8 w-8 items-center justify-center"
@@ -852,7 +1049,7 @@ function InProgressRecordingInner() {
 							</div>
 						</div>
 						<div
-							class="non-styled-move flex cursor-move items-center justify-center border-l border-gray-5 p-[0.25rem] hover:cursor-move transition-colors duration-100 hover:bg-gray-12/[0.04] dark:hover:bg-white/[0.06]"
+							class="non-styled-move flex cursor-move items-center justify-center border-l border-gray-5 p-1 hover:cursor-move transition-colors duration-100 hover:bg-gray-12/4 dark:hover:bg-white/6"
 							data-tauri-drag-region
 						>
 							<IconCapMoreVertical class="pointer-events-none text-gray-10" />
@@ -869,10 +1066,10 @@ function ActionButton(props: ComponentProps<"button">) {
 		<button
 			{...props}
 			class={cx(
-				"p-[0.25rem] rounded-lg transition-colors duration-100",
+				"p-1 rounded-lg transition-colors duration-100",
 				"text-gray-11 hover:text-gray-12",
-				"hover:bg-gray-12/[0.06] dark:hover:bg-white/[0.08]",
-				"active:bg-gray-12/[0.1] dark:active:bg-white/[0.12]",
+				"hover:bg-gray-12/6 dark:hover:bg-white/8",
+				"active:bg-gray-12/10 dark:active:bg-white/12",
 				"h-8 w-8 flex items-center justify-center",
 				"disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent",
 				props.class,

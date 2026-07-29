@@ -7,10 +7,13 @@ import { FolderId } from "./Folder.ts";
 import { OrganisationId } from "./Organisation.ts";
 import { PolicyDeniedError } from "./Policy.ts";
 import { S3BucketId } from "./S3Bucket.ts";
+import { StorageIntegrationId, UploadTarget } from "./Storage.ts";
 import { UserId } from "./User.ts";
 
 export const VideoId = Schema.String.pipe(Schema.brand("VideoId"));
 export type VideoId = typeof VideoId.Type;
+
+export const FREE_PLAN_MAX_RECORDING_SECONDS = 5 * 60;
 
 // Purposefully doesn't include password as this is a public class
 export class Video extends Schema.Class<Video>("Video")({
@@ -20,12 +23,19 @@ export class Video extends Schema.Class<Video>("Video")({
 	name: Schema.String,
 	public: Schema.Boolean,
 	source: Schema.Struct({
-		type: Schema.Literal("MediaConvert", "local", "desktopMP4", "webMP4"),
+		type: Schema.Literal(
+			"MediaConvert",
+			"local",
+			"desktopMP4",
+			"desktopSegments",
+			"webMP4",
+		),
 	}),
 	metadata: Schema.OptionFromNullOr(
 		Schema.Record({ key: Schema.String, value: Schema.Any }),
 	),
 	bucketId: Schema.OptionFromNullOr(S3BucketId),
+	storageIntegrationId: Schema.OptionFromNullOr(StorageIntegrationId),
 	folderId: Schema.OptionFromNullOr(FolderId),
 	transcriptionStatus: Schema.OptionFromNullOr(
 		Schema.Literal("PROCESSING", "COMPLETE", "ERROR", "SKIPPED", "NO_AUDIO"),
@@ -52,6 +62,9 @@ export class Video extends Schema.Class<Video>("Video")({
 				ownerId: self.ownerId,
 				subpath: "combined-source/stream.m3u8",
 			});
+
+		if (self.source.type === "desktopSegments")
+			return new SegmentsSource({ videoId: self.id, ownerId: self.ownerId });
 
 		if (self.source.type === "desktopMP4" || self.source.type === "webMP4")
 			return new Mp4Source({ videoId: self.id, ownerId: self.ownerId });
@@ -108,7 +121,7 @@ export const InstantRecordingCreateInput = Schema.Struct({
 export const InstantRecordingCreateSuccess = Schema.Struct({
 	id: VideoId,
 	shareUrl: Schema.String,
-	upload: PresignedPost,
+	upload: UploadTarget,
 });
 
 export class ImportSource extends Schema.Class<ImportSource>("ImportSource")({
@@ -135,14 +148,69 @@ export class M3U8Source extends Schema.TaggedClass<M3U8Source>()("M3U8Source", {
 	}
 }
 
+export class SegmentsSource extends Schema.TaggedClass<SegmentsSource>()(
+	"SegmentsSource",
+	{
+		videoId: Schema.String,
+		ownerId: Schema.String,
+	},
+) {
+	getManifestKey() {
+		return `${this.ownerId}/${this.videoId}/segments/manifest.json`;
+	}
+
+	getVideoInitKey() {
+		return `${this.ownerId}/${this.videoId}/segments/video/init.mp4`;
+	}
+
+	getAudioInitKey() {
+		return `${this.ownerId}/${this.videoId}/segments/audio/init.mp4`;
+	}
+
+	getVideoSegmentKey(index: number) {
+		return `${this.ownerId}/${this.videoId}/segments/video/segment_${String(index).padStart(3, "0")}.m4s`;
+	}
+
+	getAudioSegmentKey(index: number) {
+		return `${this.ownerId}/${this.videoId}/segments/audio/segment_${String(index).padStart(3, "0")}.m4s`;
+	}
+}
+
+export const SegmentManifestEntry = Schema.Union(
+	Schema.Number,
+	Schema.Struct({
+		index: Schema.Number,
+		duration: Schema.Number,
+	}),
+);
+
+export const SegmentManifest = Schema.Struct({
+	version: Schema.Number,
+	video_init_uploaded: Schema.Boolean,
+	audio_init_uploaded: Schema.Boolean,
+	video_segments: Schema.Array(SegmentManifestEntry),
+	audio_segments: Schema.Array(SegmentManifestEntry),
+	is_complete: Schema.Boolean,
+});
+
+export type SegmentManifestType = Schema.Schema.Type<typeof SegmentManifest>;
+
+export function normalizeSegmentEntry(
+	entry: Schema.Schema.Type<typeof SegmentManifestEntry>,
+): { index: number; duration: number } {
+	return typeof entry === "number" ? { index: entry, duration: 3.0 } : entry;
+}
+
 /*
- * Used to specify a video password provided by a user,
+ * Used to specify video passwords provided by a user,
  * whether via cookies in the case of the website,
- * or via query params for the API.
+ * or via query params for the API. Holds every hash the user has verified
+ * (the cookie remembers one per unlocked resource), so unlocking one share
+ * never invalidates another.
  */
 export class VideoPasswordAttachment extends Context.Tag(
 	"VideoPasswordAttachment",
-)<VideoPasswordAttachment, { password: Option.Option<string> }>() {}
+)<VideoPasswordAttachment, { passwords: ReadonlyArray<string> }>() {}
 
 export class VerifyVideoPasswordError extends Schema.TaggedError<VerifyVideoPasswordError>()(
 	"VerifyVideoPasswordError",
@@ -153,23 +221,36 @@ export class VerifyVideoPasswordError extends Schema.TaggedError<VerifyVideoPass
 ) {}
 
 export const verifyPassword = (video: Video, password: Option.Option<string>) =>
+	verifyPasswordCandidates(
+		video,
+		Option.match(password, {
+			onNone: () => [],
+			onSome: (value) => [value],
+		}),
+	);
+
+export const verifyPasswordCandidates = (
+	video: Video,
+	passwords: ReadonlyArray<string>,
+) =>
 	Effect.gen(function* () {
 		const passwordAttachment = yield* Effect.serviceOption(
 			VideoPasswordAttachment,
 		);
 
-		if (Option.isNone(password)) return;
+		if (passwords.length === 0) return;
 
-		if (
-			Option.isNone(passwordAttachment) ||
-			Option.isNone(passwordAttachment.value.password)
-		)
+		const verified = Option.isSome(passwordAttachment)
+			? passwordAttachment.value.passwords
+			: [];
+
+		if (verified.length === 0)
 			return yield* new VerifyVideoPasswordError({
 				id: video.id,
 				cause: "not-provided",
 			});
 
-		if (passwordAttachment.value.password.value !== password.value)
+		if (!verified.some((hash) => passwords.includes(hash)))
 			return yield* new VerifyVideoPasswordError({
 				id: video.id,
 				cause: "wrong-password",

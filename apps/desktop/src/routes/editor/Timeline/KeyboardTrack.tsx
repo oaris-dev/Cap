@@ -32,7 +32,11 @@ export function KeyboardTrack(props: {
 	const minDuration = () =>
 		Math.max(MIN_SEGMENT_SECS, secsPerPixel() * MIN_SEGMENT_PIXELS);
 
-	const keyboardSegments = () => project.timeline?.keyboardSegments ?? [];
+	const keyboardSegments = createMemo(() =>
+		(project.timeline?.keyboardSegments ?? []).filter(
+			(s) => s.start < totalDuration(),
+		),
+	);
 	const selectedKeyboardIndices = createMemo(() => {
 		const selection = editorState.timeline.selection;
 		if (!selection || selection.type !== "keyboard") return null;
@@ -134,9 +138,9 @@ export function KeyboardTrack(props: {
 			<For
 				each={keyboardSegments()}
 				fallback={
-					<div class="text-center text-sm text-[--text-tertiary] flex flex-col justify-center items-center inset-0 w-full bg-gray-3/20 dark:bg-gray-3/10 rounded-xl pointer-events-none">
+					<div class="text-center text-sm text-(--text-tertiary) flex flex-col justify-center items-center inset-0 w-full bg-gray-3/20 dark:bg-gray-3/10 rounded-xl pointer-events-none">
 						<div>No keyboard events</div>
-						<div class="text-[10px] text-[--text-tertiary]/40 mt-0.5">
+						<div class="text-[10px] text-(--text-tertiary)/40 mt-0.5">
 							Record keyboard presses or generate from recording
 						</div>
 					</div>
@@ -149,19 +153,23 @@ export function KeyboardTrack(props: {
 						return indices.has(i());
 					});
 
-					const segmentWidth = () => segment.end - segment.start;
+					const segmentWidth = () =>
+						Math.min(segment.end, totalDuration()) - segment.start;
 
 					return (
 						<SegmentRoot
 							data-keyboard-segment
 							data-index={i()}
+							segColor="var(--track-keyboard)"
 							class={cx(
-								"border duration-200 hover:border-sky-6 transition-colors group",
-								"bg-gradient-to-r from-[#0d1830] via-[#142445] to-[#0d1830] shadow-[inset_0_8px_12px_3px_rgba(120,180,255,0.16)]",
+								"border duration-200 transition-colors group",
 								isSelected() ? "border-sky-7" : "border-transparent",
 							)}
 							innerClass="ring-sky-6"
-							segment={segment}
+							segment={{
+								start: segment.start,
+								end: Math.min(segment.end, totalDuration()),
+							}}
 							onMouseDown={(e) => {
 								e.stopPropagation();
 								if (editorState.timeline.interactMode === "split") {

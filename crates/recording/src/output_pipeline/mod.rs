@@ -3,12 +3,33 @@ mod core;
 pub mod ffmpeg;
 #[cfg(target_os = "macos")]
 mod macos_fragmented_m4s;
+#[cfg(target_os = "macos")]
+mod macos_frame_convert;
+#[cfg(target_os = "macos")]
+mod oop_fragmented_m4s;
+pub mod oop_muxer;
 
 pub use async_camera::*;
 pub use core::*;
 pub use ffmpeg::*;
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub struct NativeCameraFrame {
+    pub timestamp: cap_timestamp::Timestamp,
+}
+
+#[cfg(target_os = "linux")]
+impl VideoFrame for NativeCameraFrame {
+    fn timestamp(&self) -> cap_timestamp::Timestamp {
+        self.timestamp
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub use macos_fragmented_m4s::*;
+#[cfg(target_os = "macos")]
+pub use oop_fragmented_m4s::*;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -34,3 +55,8 @@ pub use win_segmented_camera::*;
 mod win_fragmented_m4s;
 #[cfg(windows)]
 pub use win_fragmented_m4s::*;
+
+#[cfg(windows)]
+mod oop_fragmented_m4s_win;
+#[cfg(windows)]
+pub use oop_fragmented_m4s_win::*;

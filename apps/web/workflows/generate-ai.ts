@@ -1,14 +1,21 @@
 import { db } from "@cap/database";
-import { s3Buckets, videos } from "@cap/database/schema";
+import { organizations, videos } from "@cap/database/schema";
 import type { VideoMetadata } from "@cap/database/types";
 import { serverEnv } from "@cap/env";
-import { S3Buckets } from "@cap/web-backend";
-import type { S3Bucket, Video } from "@cap/web-domain";
-import { eq } from "drizzle-orm";
+import { Storage } from "@cap/web-backend/src/Storage/index";
+import {
+	AI_GENERATION_LANGUAGE_AUTO,
+	type AiGenerationLanguage,
+	getAiGenerationLanguageName,
+	parseAiGenerationLanguage,
+	type Video,
+} from "@cap/web-domain";
+import { and, eq, sql } from "drizzle-orm";
 import { Effect, Option } from "effect";
 import { FatalError } from "workflow";
 import { GROQ_MODEL, getGroqClient } from "@/lib/groq-client";
-import { runPromise } from "@/lib/server";
+import { decodeStorageVideo } from "@/lib/video-storage";
+import { runWorkflowPromise } from "@/lib/workflow-runtime";
 
 interface GenerateAiWorkflowPayload {
 	videoId: string;
@@ -17,8 +24,8 @@ interface GenerateAiWorkflowPayload {
 
 interface VideoData {
 	video: typeof videos.$inferSelect;
-	bucketId: S3Bucket.S3BucketId | null;
 	metadata: VideoMetadata;
+	aiGenerationLanguage: AiGenerationLanguage;
 }
 
 interface VttSegment {
@@ -38,27 +45,71 @@ interface AiResult {
 }
 
 const MAX_CHARS_PER_CHUNK = 24000;
+const LEGACY_AI_TITLE_FALLBACK = "Generated Title";
+const LEGACY_AI_SUMMARY_FALLBACK =
+	"The AI was unable to generate a proper summary for this content.";
+const GENERATED_TITLE_PATTERN =
+	/^(Cap (Recording|Upload) - .+|Cap \d{4}-\d{2}-\d{2} at \d{2}[.:]\d{2}[.:]\d{2}|Untitled|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}|.+ \((Display|Window|Area|Camera)\) \d{4}-\d{2}-\d{2} \d{2}:\d{2} [AP]M)$/;
+
+export function shouldReplaceVideoTitle({
+	currentTitle,
+	previousAiTitle,
+	nextAiTitle,
+	sourceName,
+	titleManuallyEdited,
+}: {
+	currentTitle: string | null;
+	previousAiTitle?: string | null;
+	nextAiTitle?: string | null;
+	sourceName?: string | null;
+	titleManuallyEdited?: boolean | null;
+}) {
+	const nextTitle = nextAiTitle?.trim();
+	if (!nextTitle) return false;
+	if (titleManuallyEdited) return false;
+
+	const title = currentTitle?.trim();
+	if (!title) return true;
+	if (previousAiTitle?.trim() && title === previousAiTitle.trim()) return true;
+	if (sourceName?.trim() && title === sourceName.trim()) return true;
+	if (title === LEGACY_AI_TITLE_FALLBACK) return true;
+	return GENERATED_TITLE_PATTERN.test(title);
+}
 
 export async function generateAiWorkflow(payload: GenerateAiWorkflowPayload) {
 	"use workflow";
 
 	const { videoId, userId } = payload;
 
-	const videoData = await validateAndSetProcessing(videoId);
-
-	const transcript = await fetchTranscript(videoId, userId, videoData.bucketId);
-
-	if (!transcript) {
-		await markSkipped(videoId, videoData.metadata);
-		return {
-			success: true,
-			message: "Transcript empty or too short - skipped",
-		};
+	let videoData: VideoData;
+	try {
+		videoData = await validateAndSetProcessing(videoId);
+	} catch (error) {
+		await markError(videoId);
+		throw error;
 	}
 
-	const result = await generateWithAi(transcript);
+	try {
+		const transcript = await fetchTranscript(videoId, userId, videoData.video);
 
-	await saveResults(videoId, videoData, result);
+		if (!transcript) {
+			await markSkipped(videoId, videoData.metadata);
+			return {
+				success: true,
+				message: "Transcript empty or too short - skipped",
+			};
+		}
+
+		const result = await generateWithAi(
+			transcript,
+			videoData.aiGenerationLanguage,
+		);
+
+		await saveResults(videoId, videoData, result);
+	} catch (error) {
+		await markError(videoId);
+		throw error;
+	}
 
 	return { success: true, message: "AI generation completed successfully" };
 }
@@ -67,36 +118,52 @@ async function validateAndSetProcessing(videoId: string): Promise<VideoData> {
 	"use step";
 
 	const groqClient = getGroqClient();
-	if (!groqClient && !serverEnv().OPENAI_API_KEY) {
-		throw new FatalError("Missing Groq or OpenAI API key");
+	if (
+		!groqClient &&
+		!serverEnv().OPENAI_API_KEY &&
+		!serverEnv().MISTRAL_API_KEY
+	) {
+		throw new FatalError("Missing Mistral, Groq or OpenAI API key");
 	}
 
 	const query = await db()
-		.select({ video: videos, bucket: s3Buckets })
+		.select({ video: videos, orgSettings: organizations.settings })
 		.from(videos)
-		.leftJoin(s3Buckets, eq(videos.bucket, s3Buckets.id))
+		.leftJoin(organizations, eq(videos.orgId, organizations.id))
 		.where(eq(videos.id, videoId as Video.VideoId));
 
 	if (query.length === 0 || !query[0]?.video) {
 		throw new FatalError("Video does not exist");
 	}
 
-	const { video, bucket } = query[0];
+	const { video } = query[0];
 	const metadata = (video.metadata as VideoMetadata) || {};
 
 	if (video.transcriptionStatus !== "COMPLETE") {
 		throw new FatalError("Transcription not complete");
 	}
 
-	if (metadata.summary && metadata.chapters) {
+	if (
+		metadata.summary &&
+		metadata.summary !== LEGACY_AI_SUMMARY_FALLBACK &&
+		metadata.chapters
+	) {
 		throw new FatalError("AI metadata already generated");
+	}
+
+	const processingMetadata = { ...metadata };
+	if (processingMetadata.aiTitle === LEGACY_AI_TITLE_FALLBACK) {
+		delete processingMetadata.aiTitle;
+	}
+	if (processingMetadata.summary === LEGACY_AI_SUMMARY_FALLBACK) {
+		delete processingMetadata.summary;
 	}
 
 	await db()
 		.update(videos)
 		.set({
 			metadata: {
-				...metadata,
+				...processingMetadata,
 				aiGenerationStatus: "PROCESSING",
 			},
 		})
@@ -104,24 +171,26 @@ async function validateAndSetProcessing(videoId: string): Promise<VideoData> {
 
 	return {
 		video,
-		bucketId: (bucket?.id ?? null) as S3Bucket.S3BucketId | null,
 		metadata,
+		aiGenerationLanguage: parseAiGenerationLanguage(
+			query[0]?.orgSettings?.aiGenerationLanguage,
+		),
 	};
 }
 
 async function fetchTranscript(
 	videoId: string,
 	userId: string,
-	bucketId: S3Bucket.S3BucketId | null,
+	video: typeof videos.$inferSelect,
 ): Promise<TranscriptData | null> {
 	"use step";
 
 	const vtt = await Effect.gen(function* () {
-		const [bucket] = yield* S3Buckets.getBucketAccess(
-			Option.fromNullable(bucketId),
+		const [bucket] = yield* Storage.getAccessForVideo(
+			decodeStorageVideo(video),
 		);
 		return yield* bucket.getObject(`${userId}/${videoId}/transcription.vtt`);
-	}).pipe(runPromise);
+	}).pipe(runWorkflowPromise);
 
 	if (Option.isNone(vtt)) {
 		return null;
@@ -140,34 +209,158 @@ async function fetchTranscript(
 	return { segments, text };
 }
 
+async function markError(videoId: string): Promise<void> {
+	"use step";
+
+	await db()
+		.update(videos)
+		.set({
+			metadata: sql`JSON_SET(COALESCE(${videos.metadata}, JSON_OBJECT()), '$.aiGenerationStatus', 'ERROR')`,
+		})
+		.where(
+			and(
+				eq(videos.id, videoId as Video.VideoId),
+				sql`NOT (
+					COALESCE(JSON_UNQUOTE(JSON_EXTRACT(${videos.metadata}, '$.aiGenerationStatus')), '') = 'COMPLETE'
+					AND JSON_EXTRACT(${videos.metadata}, '$.summary') IS NOT NULL
+					AND JSON_EXTRACT(${videos.metadata}, '$.chapters') IS NOT NULL
+				)`,
+			),
+		);
+}
+
 async function markSkipped(
 	videoId: string,
 	metadata: VideoMetadata,
 ): Promise<void> {
 	"use step";
 
+	const currentMetadata = await getCurrentVideoMetadata(videoId, metadata);
+
 	await db()
 		.update(videos)
 		.set({
 			metadata: {
-				...metadata,
+				...currentMetadata,
 				aiGenerationStatus: "SKIPPED",
 			},
 		})
 		.where(eq(videos.id, videoId as Video.VideoId));
 }
 
-async function generateWithAi(transcript: TranscriptData): Promise<AiResult> {
+async function generateWithAi(
+	transcript: TranscriptData,
+	language: AiGenerationLanguage,
+): Promise<AiResult> {
 	"use step";
 
 	const groqClient = getGroqClient();
 	const chunks = chunkTranscriptWithTimestamps(transcript.segments);
 
+	const videoDuration = getVideoDuration(transcript.segments);
+	const languageInstruction = getAiLanguageInstruction(language);
+
+	let result: AiResult;
 	if (chunks.length === 1) {
-		return generateSingleChunk(transcript.text, groqClient);
+		result = await generateSingleChunk(
+			transcript.segments,
+			videoDuration,
+			groqClient,
+			languageInstruction,
+		);
+	} else {
+		result = await generateMultipleChunks(
+			chunks,
+			videoDuration,
+			groqClient,
+			languageInstruction,
+		);
 	}
 
-	return generateMultipleChunks(chunks, groqClient);
+	if (result.chapters) {
+		result.chapters = clampChapters(result.chapters, videoDuration);
+	}
+
+	return result;
+}
+
+export function getAiLanguageInstruction(
+	language: AiGenerationLanguage,
+): string {
+	if (language === AI_GENERATION_LANGUAGE_AUTO) {
+		return "Write the title, summary, chapter titles, section summaries, and key points in the same language as the transcript.";
+	}
+
+	return `Write the title, summary, chapter titles, section summaries, and key points in ${getAiGenerationLanguageName(language)}.`;
+}
+
+export function getAiContentGuidelines(videoDuration: number): {
+	summary: string;
+	chapters: string;
+} {
+	let lengthInstruction: string;
+	if (videoDuration < 60) {
+		lengthInstruction = "Use no more than 35 words and one or two sentences.";
+	} else if (videoDuration < 180) {
+		lengthInstruction =
+			"Aim for 50-90 words in one concise paragraph, but use fewer when that fully communicates the video.";
+	} else if (videoDuration < 600) {
+		lengthInstruction =
+			"Aim for 80-150 words in one concise paragraph, but use fewer when that fully communicates the video.";
+	} else if (videoDuration < 1800) {
+		lengthInstruction =
+			"Aim for 150-250 words. Use short paragraphs or Markdown bullets only when they materially improve clarity.";
+	} else {
+		lengthInstruction =
+			"Aim for 250-400 words. Exceed 400 only when necessary to preserve important decisions, responsibilities, or next steps.";
+	}
+
+	return {
+		summary: `- Write a standalone summary that lets someone understand the video without watching it.
+- State the subject and the speaker's intention first: what the video is about and why it was recorded. If the intention is not explicit, describe only what the transcript supports.
+- Then include only the essential explanation, outcomes, decisions, action items, and next steps needed to understand or act on the video.
+- Prioritize meaning and useful information over chronological retelling.
+- Omit filler, greetings, reactions, apologies, repetition, incidental conversation, minor UI actions, and timestamps unless a timestamp is essential to the viewer.
+- Write from the primary speaker's point of view. For a single-person video, use "I" and "my". Use "we" only when the speaker clearly represents a team or several participants share the discussion.
+- Never describe the primary voice as "the speaker", "the presenter", "the user", "they", or any similar detached label.
+- If multiple speakers need to be distinguished, use names only when the transcript identifies them unambiguously. Otherwise summarize the discussion directly without inventing names or identities.
+- Be concise, but never omit information required to understand or act on the video. Do not pad the summary to reach a target length.
+- Convert detached narration into first person. For example, write "I review the proposal" instead of "The speaker reviews the proposal". Do not introduce names, projects, or personal details that are not present in the transcript.
+- ${lengthInstruction}`,
+		chapters:
+			videoDuration < 120
+				? 'Return an empty "chapters" array because videos shorter than two minutes do not need chapters.'
+				: "Create the fewest chapters needed to identify meaningful topic or phase changes. Do not create chapters for filler, minor UI actions, or every transcript segment.",
+	};
+}
+
+function getVideoDuration(segments: VttSegment[]): number {
+	if (segments.length === 0) return 0;
+	const lastSegment = segments[segments.length - 1];
+	return lastSegment ? lastSegment.start + 3 : 0;
+}
+
+function clampChapters(
+	chapters: { title: string; start: number }[],
+	videoDuration: number,
+): { title: string; start: number }[] {
+	const filtered = chapters.filter((ch) => ch.start < videoDuration);
+
+	if (filtered.length === 0 && chapters.length > 0) {
+		const first = chapters[0];
+		return first ? [{ title: first.title, start: 0 }] : [];
+	}
+
+	const minGap = Math.max(5, Math.floor(videoDuration / 10));
+	const deduped: { title: string; start: number }[] = [];
+	for (const chapter of filtered) {
+		const last = deduped[deduped.length - 1];
+		if (!last || Math.abs(chapter.start - last.start) >= minGap) {
+			deduped.push(chapter);
+		}
+	}
+
+	return deduped;
 }
 
 async function saveResults(
@@ -178,12 +371,18 @@ async function saveResults(
 	"use step";
 
 	const { video, metadata } = videoData;
+	const generatedTitle = result.title?.trim();
+	const currentVideo = await getCurrentVideo(videoId);
+	const currentMetadata = currentVideo
+		? (currentVideo.metadata as VideoMetadata) || {}
+		: metadata;
+	const currentTitle = currentVideo?.name ?? video.name;
 
 	const updatedMetadata: VideoMetadata = {
-		...metadata,
-		aiTitle: result.title || metadata.aiTitle,
-		summary: result.summary || metadata.summary,
-		chapters: result.chapters || metadata.chapters,
+		...currentMetadata,
+		aiTitle: generatedTitle || currentMetadata.aiTitle,
+		summary: result.summary || currentMetadata.summary,
+		chapters: result.chapters || currentMetadata.chapters,
 		aiGenerationStatus: "COMPLETE",
 	};
 
@@ -192,19 +391,47 @@ async function saveResults(
 		.set({ metadata: updatedMetadata })
 		.where(eq(videos.id, videoId as Video.VideoId));
 
-	const hasDatePattern = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(
-		video.name || "",
-	);
-
 	if (
-		(video.name?.startsWith("Cap Recording -") || hasDatePattern) &&
-		result.title
+		generatedTitle &&
+		shouldReplaceVideoTitle({
+			currentTitle,
+			previousAiTitle: currentMetadata.aiTitle,
+			nextAiTitle: generatedTitle,
+			sourceName: currentMetadata.sourceName,
+			titleManuallyEdited: currentMetadata.titleManuallyEdited,
+		})
 	) {
 		await db()
 			.update(videos)
-			.set({ name: result.title })
-			.where(eq(videos.id, videoId as Video.VideoId));
+			.set({ name: generatedTitle })
+			.where(
+				and(
+					eq(videos.id, videoId as Video.VideoId),
+					eq(videos.name, currentTitle),
+				),
+			);
 	}
+}
+
+async function getCurrentVideo(
+	videoId: string,
+): Promise<typeof videos.$inferSelect | null> {
+	const [currentVideo] = await db()
+		.select()
+		.from(videos)
+		.where(eq(videos.id, videoId as Video.VideoId));
+
+	return currentVideo ?? null;
+}
+
+async function getCurrentVideoMetadata(
+	videoId: string,
+	fallback: VideoMetadata,
+): Promise<VideoMetadata> {
+	const currentVideo = await getCurrentVideo(videoId);
+	return currentVideo
+		? (currentVideo.metadata as VideoMetadata) || {}
+		: fallback;
 }
 
 function parseVttWithTimestamps(vttContent: string): VttSegment[] {
@@ -270,69 +497,6 @@ function chunkTranscriptWithTimestamps(
 	return chunks;
 }
 
-function getLanguageInstruction(): string {
-	const lang = serverEnv().AI_RESPONSE_LANGUAGE;
-	if (!lang || lang.toLowerCase() === "en") return "";
-	const languageNames: Record<string, string> = {
-		de: "German",
-		fr: "French",
-		es: "Spanish",
-		it: "Italian",
-		pt: "Portuguese",
-		nl: "Dutch",
-		pl: "Polish",
-		ja: "Japanese",
-		ko: "Korean",
-		zh: "Chinese",
-	};
-	const name = languageNames[lang.toLowerCase()] || lang;
-	return `\nIMPORTANT: Respond entirely in ${name}. All titles, summaries, chapter names, and key points must be written in ${name}.`;
-}
-
-async function callAiApi(
-	prompt: string,
-	groqClient: ReturnType<typeof getGroqClient>,
-): Promise<string> {
-	if (serverEnv().MISTRAL_API_KEY) {
-		try {
-			return await callMistral(prompt);
-		} catch (mistralError) {
-			if (groqClient) {
-				return callWithGroqFallback(prompt, groqClient);
-			}
-			if (serverEnv().OPENAI_API_KEY) {
-				return callOpenAi(prompt);
-			}
-			throw mistralError;
-		}
-	}
-	if (groqClient) {
-		return callWithGroqFallback(prompt, groqClient);
-	}
-	if (serverEnv().OPENAI_API_KEY) {
-		return callOpenAi(prompt);
-	}
-	return "{}";
-}
-
-async function callWithGroqFallback(
-	prompt: string,
-	groqClient: NonNullable<ReturnType<typeof getGroqClient>>,
-): Promise<string> {
-	try {
-		const completion = await groqClient.chat.completions.create({
-			messages: [{ role: "user", content: prompt }],
-			model: GROQ_MODEL,
-		});
-		return completion.choices?.[0]?.message?.content || "{}";
-	} catch (groqError) {
-		if (serverEnv().OPENAI_API_KEY) {
-			return callOpenAi(prompt);
-		}
-		throw groqError;
-	}
-}
-
 async function callMistral(prompt: string): Promise<string> {
 	const aiRes = await fetch("https://api.mistral.ai/v1/chat/completions", {
 		method: "POST",
@@ -353,6 +517,40 @@ async function callMistral(prompt: string): Promise<string> {
 	return aiJson.choices?.[0]?.message?.content || "{}";
 }
 
+async function callAiApi(
+	prompt: string,
+	groqClient: ReturnType<typeof getGroqClient>,
+): Promise<string> {
+	if (serverEnv().MISTRAL_API_KEY) {
+		try {
+			return await callMistral(prompt);
+		} catch (mistralError) {
+			if (!groqClient && !serverEnv().OPENAI_API_KEY) {
+				throw mistralError;
+			}
+		}
+	}
+
+	if (groqClient) {
+		try {
+			const completion = await groqClient.chat.completions.create({
+				messages: [{ role: "user", content: prompt }],
+				model: GROQ_MODEL,
+				response_format: { type: "json_object" },
+			});
+			return completion.choices?.[0]?.message?.content || "{}";
+		} catch (groqError) {
+			if (serverEnv().OPENAI_API_KEY) {
+				return callOpenAi(prompt);
+			}
+			throw groqError;
+		}
+	} else if (serverEnv().OPENAI_API_KEY) {
+		return callOpenAi(prompt);
+	}
+	return "{}";
+}
+
 async function callOpenAi(prompt: string): Promise<string> {
 	const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
 		method: "POST",
@@ -363,6 +561,7 @@ async function callOpenAi(prompt: string): Promise<string> {
 		body: JSON.stringify({
 			model: "gpt-4o-mini",
 			messages: [{ role: "user", content: prompt }],
+			response_format: { type: "json_object" },
 		}),
 	});
 	if (!aiRes.ok) {
@@ -383,30 +582,82 @@ function cleanJsonResponse(content: string): string {
 	return content;
 }
 
-async function generateSingleChunk(
-	transcriptText: string,
-	groqClient: ReturnType<typeof getGroqClient>,
-): Promise<AiResult> {
-	const langInstruction = getLanguageInstruction();
-	const prompt = `You are an expert at analyzing video content and creating comprehensive summaries.
+function extractJsonObject(content: string): string {
+	const cleanedContent = cleanJsonResponse(content).trim();
+	const start = cleanedContent.indexOf("{");
+	if (start < 0) {
+		throw new Error("AI response did not contain a JSON object");
+	}
 
-Analyze this transcript thoroughly and provide a detailed JSON response:
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	for (let i = start; i < cleanedContent.length; i++) {
+		const character = cleanedContent[i];
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+			} else if (character === "\\") {
+				escaped = true;
+			} else if (character === '"') {
+				inString = false;
+			}
+			continue;
+		}
+
+		if (character === '"') {
+			inString = true;
+		} else if (character === "{") {
+			depth += 1;
+		} else if (character === "}") {
+			depth -= 1;
+			if (depth === 0) {
+				return cleanedContent.slice(start, i + 1);
+			}
+		}
+	}
+
+	throw new Error("AI response contained an incomplete JSON object");
+}
+
+async function generateSingleChunk(
+	segments: VttSegment[],
+	videoDuration: number,
+	groqClient: ReturnType<typeof getGroqClient>,
+	languageInstruction: string,
+): Promise<AiResult> {
+	const transcriptWithTimestamps = segments
+		.map(
+			(s) =>
+				`[${Math.floor(s.start / 60)}:${String(s.start % 60).padStart(2, "0")}] ${s.text}`,
+		)
+		.join("\n");
+	const contentGuidelines = getAiContentGuidelines(videoDuration);
+
+	const prompt = `You are Cap AI, an expert at turning video transcripts into useful, concise summaries.
+
+The video is ${videoDuration} seconds long (${Math.floor(videoDuration / 60)}:${String(Math.floor(videoDuration % 60)).padStart(2, "0")} total). Analyze this timestamped transcript and provide JSON:
 {
   "title": "string (concise but descriptive title that captures the main topic)",
-  "summary": "string (detailed summary that covers ALL key points discussed. For meetings: include decisions made, action items, and key discussion points. For tutorials: cover all steps and concepts explained. For presentations: summarize all main arguments and supporting points. Write from 1st person perspective if the speaker is teaching/presenting, e.g. 'In this video, I walk through...'. Make it comprehensive enough that someone could understand the full content without watching.)",
+  "summary": "string (standalone summary of the subject, intention, essential information, outcome, and next steps)",
   "chapters": [{"title": "string (descriptive chapter title)", "start": number (seconds from start)}]
 }
 
-Guidelines:
-- The summary should be detailed and comprehensive, not a brief overview
-- Capture ALL important topics, not just the main theme
-- For longer content, organize the summary by topic or chronologically
-- Include specific details, names, numbers, and conclusions mentioned
-- Chapters should mark distinct topic changes or sections
-${langInstruction}
+Summary requirements:
+${contentGuidelines.summary}
+
+Chapter requirements:
+${contentGuidelines.chapters}
+
+Additional requirements:
+- ${languageInstruction}
+- Keep JSON property names exactly as shown.
+- Include specific names, numbers, decisions, and conclusions only when they help someone understand or act on the video.
+- IMPORTANT: All chapter "start" values MUST be between 0 and ${videoDuration} seconds. Use the timestamps from the transcript to determine accurate chapter start times.
+
 Return ONLY valid JSON without any markdown formatting or code blocks.
 Transcript:
-${transcriptText}`;
+${transcriptWithTimestamps}`;
 
 	const content = await callAiApi(prompt, groqClient);
 	return parseAiResponse(content);
@@ -414,9 +665,10 @@ ${transcriptText}`;
 
 async function generateMultipleChunks(
 	chunks: { text: string; startTime: number; endTime: number }[],
+	videoDuration: number,
 	groqClient: ReturnType<typeof getGroqClient>,
+	languageInstruction: string,
 ): Promise<AiResult> {
-	const langInstruction = getLanguageInstruction();
 	const chunkSummaries: {
 		summary: string;
 		keyPoints: string[];
@@ -424,22 +676,29 @@ async function generateMultipleChunks(
 		startTime: number;
 		endTime: number;
 	}[] = [];
+	const contentGuidelines = getAiContentGuidelines(videoDuration);
 
 	for (let i = 0; i < chunks.length; i++) {
 		const chunk = chunks[i];
 		if (!chunk) continue;
 
-		const chunkPrompt = `You are an expert at analyzing video content. This is section ${i + 1} of ${chunks.length} from a longer video (timestamp ${Math.floor(chunk.startTime / 60)}:${String(chunk.startTime % 60).padStart(2, "0")} to ${Math.floor(chunk.endTime / 60)}:${String(chunk.endTime % 60).padStart(2, "0")}).
+		const chunkPrompt = `You are Cap AI, analyzing one section of a video for a later final summary. This is section ${i + 1} of ${chunks.length} from a video that is ${videoDuration} seconds long (${Math.floor(videoDuration / 60)}:${String(Math.floor(videoDuration % 60)).padStart(2, "0")} total). This section covers timestamp ${Math.floor(chunk.startTime / 60)}:${String(chunk.startTime % 60).padStart(2, "0")} to ${Math.floor(chunk.endTime / 60)}:${String(chunk.endTime % 60).padStart(2, "0")}.
 
-Analyze this section thoroughly and provide JSON:
+Extract only the information needed to understand this section's contribution to the full video and provide JSON:
 {
-  "summary": "string (detailed summary of this section - capture ALL key points, topics discussed, decisions made, or concepts explained. Include specific details like names, numbers, action items, and conclusions. This should be 3-6 sentences minimum.)",
-  "keyPoints": ["string (specific key point or takeaway)", ...],
+  "summary": "string (concise factual notes about the subject, intention, essential explanation, outcomes, decisions, or next steps in this section)",
+  "keyPoints": ["string (essential key point or takeaway, or an empty array when there is none)", ...],
   "chapters": [{"title": "string (descriptive title for this topic/section)", "start": number (seconds from video start)}]
 }
 
-Be thorough - this summary will be combined with other sections to create a comprehensive overview.
-${langInstruction}Return ONLY valid JSON without any markdown formatting or code blocks.
+- Preserve specific names, numbers, decisions, responsibilities, and conclusions that matter to the final summary.
+- Omit filler, greetings, reactions, apologies, repetition, incidental conversation, and minor UI actions.
+- Do not narrate the transcript chronologically or pad the section analysis.
+- ${contentGuidelines.chapters}
+- ${languageInstruction}
+- Keep JSON property names exactly as shown.
+IMPORTANT: All chapter "start" values MUST be between ${chunk.startTime} and ${chunk.endTime} seconds. The total video is only ${videoDuration} seconds long.
+Return ONLY valid JSON without any markdown formatting or code blocks.
 Transcript section:
 ${chunk.text}`;
 
@@ -460,9 +719,10 @@ ${chunk.text}`;
 	const sortedChapters = chunkSummaries
 		.flatMap((c) => c.chapters)
 		.sort((a, b) => a.start - b.start);
+	const minGap = Math.max(5, Math.floor(videoDuration / 10));
 	for (const chapter of sortedChapters) {
 		const lastChapter = allChapters[allChapters.length - 1];
-		if (!lastChapter || Math.abs(chapter.start - lastChapter.start) >= 30) {
+		if (!lastChapter || Math.abs(chapter.start - lastChapter.start) >= minGap) {
 			allChapters.push(chapter);
 		}
 	}
@@ -478,9 +738,9 @@ ${chunk.text}`;
 		})
 		.join("\n\n");
 
-	const finalPrompt = `You are an expert at synthesizing information into comprehensive, well-organized summaries.
+	const finalPrompt = `You are Cap AI, an expert at turning video analyses into useful, concise summaries.
 
-Based on these detailed section analyses of a video, create a thorough final summary that captures EVERYTHING important.
+Using these section analyses, create a standalone final summary that lets someone understand the video without watching it.
 
 Section analyses:
 ${sectionDetails}
@@ -490,11 +750,15 @@ ${allKeyPoints.length > 0 ? `All key points identified:\n${allKeyPoints.map((p, 
 Provide JSON in the following format:
 {
   "title": "string (concise but descriptive title that captures the main topic/purpose)",
-  "summary": "string (COMPREHENSIVE summary that covers the entire video thoroughly. This should be detailed enough that someone could understand all the important content without watching. Include: main topics covered, key decisions or conclusions, important details mentioned, action items if any. Organize it logically - for meetings use topics/agenda items, for tutorials use steps/concepts, for presentations use main arguments. Write from 1st person perspective if appropriate. This should be several paragraphs for longer content.)"
+  "summary": "string (standalone summary of the subject, intention, essential information, outcome, and next steps)"
 }
 
-The summary must be detailed and comprehensive - not a brief overview. Capture all the important information from every section.
-${langInstruction}
+Summary requirements:
+${contentGuidelines.summary}
+
+Additional requirements:
+- ${languageInstruction}
+- Keep JSON property names exactly as shown.
 Return ONLY valid JSON without any markdown formatting or code blocks.`;
 
 	const finalContent = await callAiApi(finalPrompt, groqClient);
@@ -521,35 +785,36 @@ Return ONLY valid JSON without any markdown formatting or code blocks.`;
 	}
 }
 
-function parseAiResponse(content: string): AiResult {
-	try {
-		const data = JSON.parse(cleanJsonResponse(content).trim());
-
-		if (data.chapters && data.chapters.length > 0) {
-			const sortedChapters = data.chapters.sort(
-				(a: { start: number }, b: { start: number }) => a.start - b.start,
-			);
-			const dedupedChapters: { title: string; start: number }[] = [];
-			for (const chapter of sortedChapters) {
-				const lastChapter = dedupedChapters[dedupedChapters.length - 1];
-				if (!lastChapter || Math.abs(chapter.start - lastChapter.start) >= 30) {
-					dedupedChapters.push(chapter);
-				}
-			}
-			data.chapters = dedupedChapters;
-		}
-
-		return {
-			title: data.title,
-			summary: data.summary,
-			chapters: data.chapters,
-		};
-	} catch {
-		return {
-			title: "Generated Title",
-			summary:
-				"The AI was unable to generate a proper summary for this content.",
-			chapters: [],
-		};
+export function parseAiResponse(content: string): AiResult {
+	const data = JSON.parse(extractJsonObject(content)) as {
+		title?: unknown;
+		summary?: unknown;
+		chapters?: unknown;
+	};
+	if (typeof data.title !== "string" || !data.title.trim()) {
+		throw new Error("AI response did not contain a valid title");
 	}
+	if (typeof data.summary !== "string" || !data.summary.trim()) {
+		throw new Error("AI response did not contain a valid summary");
+	}
+
+	const chapters = Array.isArray(data.chapters)
+		? data.chapters
+				.filter(
+					(ch): ch is { start: number; title: string } =>
+						typeof ch === "object" &&
+						ch !== null &&
+						typeof ch.start === "number" &&
+						ch.start >= 0 &&
+						typeof ch.title === "string" &&
+						ch.title.trim().length > 0,
+				)
+				.sort((a, b) => a.start - b.start)
+		: [];
+
+	return {
+		title: data.title.trim(),
+		summary: data.summary.trim(),
+		chapters,
+	};
 }

@@ -1,4 +1,7 @@
-use crate::{ArcLock, feeds::microphone::MicrophoneFeed, permissions, web_api::ManagerExt};
+use crate::{
+    ArcLock, feeds::microphone::MicrophoneFeed, general_settings::GeneralSettingsStore,
+    permissions, web_api::ManagerExt,
+};
 use cap_recording::diagnostics::{
     CameraDiagnostics, CameraFormatInfo, DisplayDiagnostics, HardwareInfo, MicrophoneDiagnostics,
     StorageInfo,
@@ -30,7 +33,7 @@ async fn get_latest_log_file(app: &AppHandle) -> Option<PathBuf> {
         })
         .collect();
 
-    log_files.sort_by(|a, b| b.1.cmp(&a.1));
+    log_files.sort_by_key(|b| std::cmp::Reverse(b.1));
     log_files.first().map(|(path, _)| path.clone())
 }
 
@@ -208,7 +211,7 @@ pub async fn upload_log_file(app: &AppHandle) -> Result<(), String> {
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {e}"))?;
-    let recordings_dir = app_data_dir.join("recordings");
+    let recordings_dir = GeneralSettingsStore::recordings_dir(app);
 
     let is_recording = {
         let app_lock = app.state::<ArcLock<crate::App>>();

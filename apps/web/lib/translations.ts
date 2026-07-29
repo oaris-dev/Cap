@@ -42,6 +42,7 @@ const en = {
 	"header.connectCustomDomain": "Connect a custom domain",
 	"header.goTo": "Go to",
 	"header.dashboard": "Dashboard",
+	"header.goToDashboard": "Go to dashboard",
 	"header.viewAnalytics": "View analytics",
 
 	"sidebar.comments": "Comments",
@@ -166,6 +167,7 @@ const de: Record<keyof typeof en, string> = {
 	"header.connectCustomDomain": "Eigene Domain verbinden",
 	"header.goTo": "Zum",
 	"header.dashboard": "Dashboard",
+	"header.goToDashboard": "Zum Dashboard",
 	"header.viewAnalytics": "Analysen anzeigen",
 
 	"sidebar.comments": "Kommentare",

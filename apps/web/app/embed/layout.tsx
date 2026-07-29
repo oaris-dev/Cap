@@ -1,4 +1,5 @@
 import type { PropsWithChildren } from "react";
+import { PublicPageProviders } from "../Layout/PublicPageProviders";
 
 const sandboxPatchScript = [
 	"(function(){",
@@ -21,7 +22,7 @@ export default function EmbedLayout({ children }: PropsWithChildren) {
 	return (
 		<>
 			<script dangerouslySetInnerHTML={{ __html: sandboxPatchScript }} />
-			{children}
+			<PublicPageProviders>{children}</PublicPageProviders>
 		</>
 	);
 }

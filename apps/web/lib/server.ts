@@ -1,10 +1,10 @@
 import "server-only";
 
-import { decrypt } from "@cap/database/crypto";
 import { serverEnv } from "@cap/env";
 import {
 	AwsCredentials,
 	Database,
+	Extensions,
 	Folders,
 	HttpAuthMiddlewareLive,
 	ImageUploads,
@@ -13,6 +13,7 @@ import {
 	S3Buckets,
 	Spaces,
 	SpacesPolicy,
+	Storage,
 	Tinybird,
 	Users,
 	Videos,
@@ -40,20 +41,15 @@ import {
 	Option,
 	Redacted,
 } from "effect";
-import { cookies } from "next/headers";
 import { allowedOrigins } from "@/utils/cors";
+import { getVerifiedPasswordHashes } from "./password-cookie";
 import { layerTracer } from "./tracing";
 
 const CookiePasswordAttachmentLive = Layer.effect(
 	Video.VideoPasswordAttachment,
 	Effect.gen(function* () {
-		const password = Option.fromNullable(
-			yield* Effect.promise(async () => {
-				const pw = (await cookies()).get("x-cap-password")?.value;
-				if (pw) return decrypt(pw);
-			}),
-		);
-		return { password };
+		const passwords = yield* Effect.promise(getVerifiedPasswordHashes);
+		return { passwords };
 	}),
 );
 
@@ -111,10 +107,12 @@ const WorkflowRpcLive = Layer.unwrapScoped(
 
 export const Dependencies = Layer.mergeAll(
 	S3Buckets.Default,
+	Storage.Default,
 	Videos.Default,
 	VideosPolicy.Default,
 	VideosRepo.Default,
 	Tinybird.Default,
+	Extensions.Default,
 	Folders.Default,
 	SpacesPolicy.Default,
 	OrganisationsPolicy.Default,
@@ -166,7 +164,7 @@ export const runPromiseExit = <A, E>(
 const cors = HttpApiBuilder.middlewareCors({
 	allowedOrigins,
 	credentials: true,
-	allowedMethods: ["GET", "HEAD", "POST", "OPTIONS"],
+	allowedMethods: ["GET", "HEAD", "POST", "DELETE", "OPTIONS"],
 	allowedHeaders: ["Content-Type", "Authorization", "sentry-trace", "baggage"],
 });
 
@@ -208,7 +206,7 @@ export const apiToHandlerWithPassword = (
 			HttpApiBuilder.middleware(
 				Effect.provide(
 					Layer.succeed(Video.VideoPasswordAttachment, {
-						password: Option.some(password),
+						passwords: [password],
 					}),
 				),
 			),

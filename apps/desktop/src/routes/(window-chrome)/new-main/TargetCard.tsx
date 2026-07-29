@@ -9,11 +9,17 @@ import { createMemo, createSignal, Show, splitProps } from "solid-js";
 import toast from "solid-toast";
 import Tooltip from "~/components/Tooltip";
 import {
+	createScreenshotShareLinkFromProjectPath,
+	type ScreenshotExportStatus,
+	screenshotShareStatusText,
+} from "~/routes/screenshot-editor/screenshotExport";
+import { openRecordingFolder } from "~/utils/recording";
+import {
 	type CaptureDisplayWithThumbnail,
 	type CaptureWindowWithThumbnail,
 	commands,
-	type RecordingMeta,
 	type RecordingMetaWithMetadata,
+	type ScreenshotMetaWithMetadata,
 } from "~/utils/tauri";
 import IconCapLink from "~icons/cap/link";
 import IconCapTrash from "~icons/cap/trash";
@@ -29,7 +35,7 @@ import IconMdiMonitor from "~icons/mdi/monitor";
 import IconPhWarningBold from "~icons/ph/warning-bold";
 
 export type RecordingWithPath = RecordingMetaWithMetadata & { path: string };
-export type ScreenshotWithPath = RecordingMeta & { path: string };
+export type ScreenshotWithPath = ScreenshotMetaWithMetadata & { path: string };
 
 function formatResolution(width?: number, height?: number) {
 	if (!width || !height) return undefined;
@@ -83,6 +89,9 @@ export default function TargetCard(props: TargetCardProps) {
 		"highlightQuery",
 	]);
 	const [imageExists, setImageExists] = createSignal(true);
+	const [isSharingScreenshot, setIsSharingScreenshot] = createSignal(false);
+	const [screenshotShareStatus, setScreenshotShareStatus] =
+		createSignal<ScreenshotExportStatus>("idle");
 
 	const recordingProps = () => {
 		if (local.variant !== "recording") return undefined;
@@ -198,7 +207,7 @@ export default function TargetCard(props: TargetCardProps) {
 		return parts.map((part) => {
 			if (part.toLowerCase() === lowercaseQuery) {
 				return (
-					<span class="rounded bg-blue-9/20 px-[1px] text-gray-12">{part}</span>
+					<span class="rounded-sm bg-blue-9/20 px-px text-gray-12">{part}</span>
 				);
 			}
 			return part;
@@ -252,6 +261,38 @@ export default function TargetCard(props: TargetCardProps) {
 		}
 	};
 
+	const handleShareScreenshot = async (e: MouseEvent) => {
+		e.stopPropagation();
+		if (isSharingScreenshot()) return;
+
+		const screenshot = screenshotTarget();
+		if (!screenshot) return;
+
+		setIsSharingScreenshot(true);
+		setScreenshotShareStatus("rendering");
+		const toastId = toast.loading(screenshotShareStatusText("rendering"));
+
+		try {
+			await createScreenshotShareLinkFromProjectPath(
+				screenshot.path,
+				(status) => {
+					setScreenshotShareStatus(status);
+					if (status !== "idle") {
+						toast.loading(screenshotShareStatusText(status), { id: toastId });
+					}
+				},
+			);
+			toast.success("Share link copied to clipboard", { id: toastId });
+		} catch (error) {
+			console.error("Failed to create screenshot share link:", error);
+			const message = error instanceof Error ? error.message : String(error);
+			toast.error(message || "Failed to create share link", { id: toastId });
+		} finally {
+			setIsSharingScreenshot(false);
+			setScreenshotShareStatus("idle");
+		}
+	};
+
 	const handleOpenRecordingEditor = (e: MouseEvent) => {
 		e.stopPropagation();
 		const recording = recordingTarget();
@@ -272,11 +313,10 @@ export default function TargetCard(props: TargetCardProps) {
 		e.stopPropagation();
 		const recording = recordingTarget();
 		if (!recording) return;
-		const path =
-			recording.mode === "instant"
-				? `${recording.path}/content/output.mp4`
-				: recording.path;
-		commands.openFilePath(path);
+		openRecordingFolder(recording.path, recording.mode).catch((error) => {
+			console.error("Failed to open recording folder:", error);
+			toast.error("Failed to open folder");
+		});
 	};
 
 	const handleDeleteRecording = async (e: MouseEvent) => {
@@ -318,12 +358,12 @@ export default function TargetCard(props: TargetCardProps) {
 			disabled={local.disabled}
 			data-variant={local.variant}
 			class={cx(
-				"group flex flex-col overflow-hidden rounded-lg border border-transparent bg-gray-3 text-left outline-none transition-colors duration-100 hover:bg-gray-4 focus-visible:ring-2 focus-visible:ring-blue-9 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-1",
+				"group flex flex-col overflow-hidden rounded-lg border border-transparent bg-gray-3 text-left outline-hidden transition-colors duration-100 hover:bg-gray-4 focus-visible:ring-2 focus-visible:ring-blue-9 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-1",
 				local.disabled && "pointer-events-none opacity-60",
 				local.class,
 			)}
 		>
-			<div class="relative h-[4.75rem] w-full overflow-hidden bg-gray-4/40">
+			<div class="relative h-19 w-full overflow-hidden bg-gray-4/40">
 				<Show
 					when={imageExists() ? thumbnailSrc() : undefined}
 					fallback={
@@ -358,10 +398,15 @@ export default function TargetCard(props: TargetCardProps) {
 					)}
 				</Show>
 				<div class="absolute inset-0 border opacity-60 pointer-events-none border-black/5" />
-				<div class="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t to-transparent pointer-events-none from-black/40" />
+				<div class="absolute inset-x-0 bottom-0 h-10 bg-linear-to-t to-transparent pointer-events-none from-black/40" />
+				<Show when={(recordingTarget()?.clip_count ?? 0) > 1}>
+					<div class="absolute left-1 top-1 rounded-full bg-black/55 px-1.5 py-0.5 text-[10px] font-medium text-white">
+						{recordingTarget()?.clip_count} clips
+					</div>
+				</Show>
 				<Show when={recordingFailed() || recordingUploadFailed()}>
 					<div class="absolute inset-0 flex items-center justify-center bg-black/75">
-						<div class="flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-9/20 text-red-11">
+						<div class="flex items-center gap-1 px-1.5 py-0.5 rounded-sm bg-red-9/20 text-red-11">
 							<IconPhWarningBold class="size-2.5" />
 							<span class="text-[10px] font-medium">
 								{recordingFailed() ? "Recording failed" : "Upload failed"}
@@ -395,7 +440,7 @@ export default function TargetCard(props: TargetCardProps) {
 								role="button"
 								tabIndex={-1}
 								onClick={handleOpenEditor}
-								class="flex-1 flex items-center justify-center p-1 rounded hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
+								class="flex-1 flex items-center justify-center p-1 rounded-sm hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
 							>
 								<IconLucideEdit class="size-3.5" />
 							</div>
@@ -405,7 +450,7 @@ export default function TargetCard(props: TargetCardProps) {
 								role="button"
 								tabIndex={-1}
 								onClick={handleCopy}
-								class="flex-1 flex items-center justify-center p-1 rounded hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
+								class="flex-1 flex items-center justify-center p-1 rounded-sm hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
 							>
 								<IconLucideCopy class="size-3.5" />
 							</div>
@@ -415,9 +460,37 @@ export default function TargetCard(props: TargetCardProps) {
 								role="button"
 								tabIndex={-1}
 								onClick={handleSave}
-								class="flex-1 flex items-center justify-center p-1 rounded hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
+								class="flex-1 flex items-center justify-center p-1 rounded-sm hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
 							>
 								<IconLucideSave class="size-3.5" />
+							</div>
+						</Tooltip>
+						<Tooltip
+							content={screenshotShareStatusText(screenshotShareStatus())}
+						>
+							<div
+								role="button"
+								tabIndex={-1}
+								aria-disabled={isSharingScreenshot()}
+								onClick={handleShareScreenshot}
+								class={cx(
+									"flex-1 flex items-center justify-center p-1 rounded-sm hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors",
+									isSharingScreenshot() &&
+										"pointer-events-none opacity-60 hover:bg-transparent",
+								)}
+							>
+								<Show
+									when={isSharingScreenshot()}
+									fallback={<IconCapLink class="size-3.5" />}
+								>
+									<ProgressCircle
+										variant="primary"
+										progress={
+											screenshotShareStatus() === "uploading" ? 0.65 : 0.25
+										}
+										size="xs"
+									/>
+								</Show>
 							</div>
 						</Tooltip>
 					</div>
@@ -440,7 +513,7 @@ export default function TargetCard(props: TargetCardProps) {
 											role="button"
 											tabIndex={-1}
 											onClick={handleOpenRecordingEditor}
-											class="flex-1 flex items-center justify-center p-1 rounded hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
+											class="flex-1 flex items-center justify-center p-1 rounded-sm hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
 										>
 											<IconLucideEdit class="size-3.5" />
 										</div>
@@ -457,7 +530,7 @@ export default function TargetCard(props: TargetCardProps) {
 													role="button"
 													tabIndex={-1}
 													onClick={handleReupload}
-													class="flex-1 flex items-center justify-center p-1 rounded hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
+													class="flex-1 flex items-center justify-center p-1 rounded-sm hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
 												>
 													<IconLucideRotateCcw class="size-3.5" />
 												</div>
@@ -479,7 +552,7 @@ export default function TargetCard(props: TargetCardProps) {
 											role="button"
 											tabIndex={-1}
 											onClick={handleOpenRecordingLink}
-											class="flex-1 flex items-center justify-center p-1 rounded hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
+											class="flex-1 flex items-center justify-center p-1 rounded-sm hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
 										>
 											<IconCapLink class="size-3.5" />
 										</div>
@@ -490,7 +563,7 @@ export default function TargetCard(props: TargetCardProps) {
 										role="button"
 										tabIndex={-1}
 										onClick={handleOpenRecordingFolder}
-										class="flex-1 flex items-center justify-center p-1 rounded hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
+										class="flex-1 flex items-center justify-center p-1 rounded-sm hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
 									>
 										<IconLucideFolder class="size-3.5" />
 									</div>
@@ -500,7 +573,7 @@ export default function TargetCard(props: TargetCardProps) {
 										role="button"
 										tabIndex={-1}
 										onClick={handleDeleteRecording}
-										class="flex-1 flex items-center justify-center p-1 rounded hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
+										class="flex-1 flex items-center justify-center p-1 rounded-sm hover:bg-gray-5 text-gray-11 hover:text-gray-12 transition-colors"
 									>
 										<IconCapTrash class="size-3.5" />
 									</div>
@@ -526,12 +599,12 @@ export function TargetCardSkeleton(props: { class?: string }) {
 				props.class,
 			)}
 		>
-			<div class="h-[4.75rem] w-full animate-pulse bg-gray-4" />
+			<div class="h-19 w-full animate-pulse bg-gray-4" />
 			<div class="flex flex-row items-start gap-2 px-2 py-1.5">
 				<div class="flex-1 space-y-1">
-					<div class="w-3/4 h-3 rounded bg-gray-4" />
-					<div class="h-2.5 w-1/2 rounded bg-gray-4" />
-					<div class="h-2.5 w-2/5 rounded bg-gray-4" />
+					<div class="w-3/4 h-3 rounded-sm bg-gray-4" />
+					<div class="h-2.5 w-1/2 rounded-sm bg-gray-4" />
+					<div class="h-2.5 w-2/5 rounded-sm bg-gray-4" />
 				</div>
 			</div>
 		</div>

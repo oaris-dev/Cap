@@ -1,4 +1,8 @@
 import { serverEnv } from "@cap/env";
+import {
+	AI_GENERATION_LANGUAGE_AUTO,
+	type AiGenerationLanguage,
+} from "@cap/web-domain";
 import { formatTimestamp } from "@/lib/transcribe-utils";
 
 interface VoxtralSegment {
@@ -24,6 +28,7 @@ interface VoxtralResponse {
 
 export async function transcribeWithVoxtral(
 	audioData: Buffer,
+	language: AiGenerationLanguage = AI_GENERATION_LANGUAGE_AUTO,
 ): Promise<string | null> {
 	const apiKey = serverEnv().MISTRAL_API_KEY;
 	if (!apiKey) return null;
@@ -38,6 +43,10 @@ export async function transcribeWithVoxtral(
 		formData.append("model", "voxtral-mini-latest");
 		formData.append("response_format", "verbose_json");
 		formData.append("timestamp_granularities", "word");
+
+		if (language !== AI_GENERATION_LANGUAGE_AUTO) {
+			formData.append("language", language);
+		}
 
 		const baseUrl = serverEnv().MISTRAL_API_URL ?? "https://api.mistral.ai";
 		const response = await fetch(`${baseUrl}/v1/audio/transcriptions`, {

@@ -1,7 +1,7 @@
 use reqwest::StatusCode;
 use tauri::{Emitter, Manager, Runtime};
 use thiserror::Error;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     ArcLock,
@@ -51,7 +51,9 @@ impl From<String> for AuthedApiError {
 }
 
 fn apply_env_headers(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    let mut req = req.header("X-Cap-Desktop-Version", env!("CARGO_PKG_VERSION"));
+    let mut req = req
+        .header("X-Cap-Desktop-Version", env!("CARGO_PKG_VERSION"))
+        .header("X-Cap-Desktop-Features", "googleDriveUpload");
 
     if let Ok(s) = std::env::var("VITE_VERCEL_AUTOMATION_BYPASS_SECRET") {
         req = req.header("x-vercel-protection-bypass", s);
@@ -125,13 +127,13 @@ impl<T: Manager<R> + Emitter<R>, R: Runtime> ManagerExt<R> for T {
     ) -> Result<reqwest::Response, AuthedApiError> {
         let Some(auth) = AuthStore::get(self.app_handle()).map_err(AuthedApiError::AuthStore)?
         else {
-            warn!("Not logged in");
+            debug!("Skipping authenticated API request because user is not logged in");
             return Err(AuthedApiError::InvalidAuthentication);
         };
 
         let path = path.into();
         let server_url = current_server_url(self).await?;
-        let url = format!("{}{}", server_url, path);
+        let url = format!("{server_url}{path}");
         let response =
             do_authed_request(&self.state::<http_client::HttpClient>(), &auth, build, url).await?;
 
@@ -158,7 +160,7 @@ impl<T: Manager<R> + Emitter<R>, R: Runtime> ManagerExt<R> for T {
     async fn make_app_url(&self, pathname: impl AsRef<str>) -> String {
         let pathname = pathname.as_ref();
         match current_server_url(self).await {
-            Ok(server_url) => format!("{}{}", server_url, pathname),
+            Ok(server_url) => format!("{server_url}{pathname}"),
             Err(err) => {
                 warn!("App state unavailable while building app URL: {err}");
                 format!("{}{}", default_server_url(), pathname)

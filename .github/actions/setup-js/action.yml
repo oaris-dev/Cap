@@ -4,17 +4,26 @@ runs:
   using: "composite"
   steps:
     - name: Install pnpm
-      uses: pnpm/action-setup@v2
+      uses: pnpm/action-setup@v6
       with:
-        version: 10.5.2
         run_install: false
 
     - name: Setup node
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
-        node-version: 24
+        node-version: 20
         cache: pnpm
 
     - name: Install frontend dependencies
       shell: bash
-      run: pnpm install
+      run: |
+        set -euo pipefail
+        for attempt in 1 2 3; do
+          if pnpm install; then
+            exit 0
+          fi
+          if [[ "$attempt" == "3" ]]; then
+            exit 1
+          fi
+          sleep $((attempt * 30))
+        done

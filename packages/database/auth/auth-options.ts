@@ -1,9 +1,12 @@
 import crypto from "node:crypto";
 import { serverEnv } from "@cap/env";
+import { User } from "@cap/web-domain";
 import { eq } from "drizzle-orm";
 import type { NextAuthOptions } from "next-auth";
 import { getServerSession as _getServerSession } from "next-auth";
 import type { Adapter } from "next-auth/adapters";
+import { decode, type JWT, type JWTDecodeParams } from "next-auth/jwt";
+import AppleProvider from "next-auth/providers/apple";
 import EmailProvider from "next-auth/providers/email";
 import GoogleProvider from "next-auth/providers/google";
 import type { Provider } from "next-auth/providers/index";
@@ -16,6 +19,31 @@ import { DrizzleAdapter } from "./drizzle-adapter.ts";
 
 export const maxDuration = 120;
 
+export async function decodeSessionToken(
+	params: JWTDecodeParams,
+): Promise<JWT | null> {
+	const token = await decode(params);
+	if (!token) return null;
+
+	const userId = typeof token.id === "string" ? token.id : null;
+	if (!userId) return token;
+
+	const [user] = await db()
+		.select({ authSessionVersion: users.authSessionVersion })
+		.from(users)
+		.where(eq(users.id, User.UserId.make(userId)))
+		.limit(1);
+
+	if (!user) return null;
+
+	const sessionVersion =
+		typeof token.sessionVersion === "number" ? token.sessionVersion : 0;
+
+	if (sessionVersion !== user.authSessionVersion) return null;
+
+	return token;
+}
+
 export const authOptions = (): NextAuthOptions => {
 	let _adapter: Adapter | undefined;
 	let _providers: Provider[] | undefined;
@@ -26,9 +54,12 @@ export const authOptions = (): NextAuthOptions => {
 			_adapter = DrizzleAdapter(db());
 			return _adapter;
 		},
-		debug: true,
+		debug: process.env.NODE_ENV !== "production",
 		session: {
 			strategy: "jwt",
+		},
+		jwt: {
+			decode: decodeSessionToken,
 		},
 		get secret() {
 			return serverEnv().NEXTAUTH_SECRET;
@@ -38,10 +69,20 @@ export const authOptions = (): NextAuthOptions => {
 		},
 		get providers() {
 			if (_providers) return _providers;
+			const appleClientId = serverEnv().APPLE_CLIENT_ID;
+			const appleClientSecret = serverEnv().APPLE_CLIENT_SECRET;
 			_providers = [
+				...(appleClientId && appleClientSecret
+					? [
+							AppleProvider({
+								clientId: appleClientId,
+								clientSecret: appleClientSecret,
+							}),
+						]
+					: []),
 				GoogleProvider({
-					clientId: serverEnv().GOOGLE_CLIENT_ID!,
-					clientSecret: serverEnv().GOOGLE_CLIENT_SECRET!,
+					clientId: serverEnv().GOOGLE_CLIENT_ID as string,
+					clientSecret: serverEnv().GOOGLE_CLIENT_SECRET as string,
 					authorization: {
 						params: {
 							scope: [
@@ -71,8 +112,6 @@ export const authOptions = (): NextAuthOptions => {
 						return crypto.randomInt(100000, 1000000).toString();
 					},
 					async sendVerificationRequest({ identifier, token }) {
-						console.log("sendVerificationRequest");
-
 						if (!serverEnv().RESEND_API_KEY) {
 							console.log("\n");
 							console.log(
@@ -90,10 +129,8 @@ export const authOptions = (): NextAuthOptions => {
 							);
 							console.log("\n");
 						} else {
-							console.log({ identifier, token });
 							const { OTPEmail } = await import("../emails/otp-email");
 							const email = OTPEmail({ code: token, email: identifier });
-							console.log({ email });
 							await sendEmail({
 								email: identifier,
 								subject: `Your Cap Verification Code`,
@@ -114,6 +151,25 @@ export const authOptions = (): NextAuthOptions => {
 					sameSite: "none",
 					path: "/",
 					secure: true,
+				},
+			},
+			callbackUrl: {
+				name: "next-auth.callback-url",
+				options: {
+					httpOnly: true,
+					sameSite: "none",
+					path: "/",
+					secure: true,
+				},
+			},
+			pkceCodeVerifier: {
+				name: "next-auth.pkce.code_verifier",
+				options: {
+					httpOnly: true,
+					sameSite: "none",
+					path: "/",
+					secure: true,
+					maxAge: 60 * 15,
 				},
 			},
 		},
@@ -170,6 +226,7 @@ export const authOptions = (): NextAuthOptions => {
 							lastName: users.lastName,
 							email: users.email,
 							image: users.image,
+							authSessionVersion: users.authSessionVersion,
 						})
 						.from(users)
 						.where(eq(users.email, (token.email || "").toLowerCase()))
@@ -188,6 +245,7 @@ export const authOptions = (): NextAuthOptions => {
 						lastName: dbUser.lastName,
 						email: dbUser.email,
 						picture: dbUser.image,
+						sessionVersion: dbUser.authSessionVersion,
 					};
 				}
 

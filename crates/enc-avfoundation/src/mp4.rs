@@ -45,6 +45,7 @@ pub struct MP4Encoder {
     last_audio_end_pts: Option<i64>,
     last_audio_timescale: Option<i32>,
     pending_video_frame: Option<PendingVideoFrame>,
+    instant_mode: bool,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -118,7 +119,46 @@ impl MP4Encoder {
         audio_config: Option<AudioInfo>,
         output_height: Option<u32>,
     ) -> Result<Self, InitError> {
-        Self::init_with_options(output, video_config, audio_config, output_height, false)
+        Self::init_with_options(
+            output,
+            video_config,
+            audio_config,
+            output_height,
+            BitrateProfile::Balanced,
+            false,
+        )
+    }
+
+    pub fn init_ultra(
+        output: PathBuf,
+        video_config: VideoInfo,
+        audio_config: Option<AudioInfo>,
+        output_height: Option<u32>,
+    ) -> Result<Self, InitError> {
+        Self::init_with_options(
+            output,
+            video_config,
+            audio_config,
+            output_height,
+            BitrateProfile::Ultra,
+            false,
+        )
+    }
+
+    pub fn init_compatibility(
+        output: PathBuf,
+        video_config: VideoInfo,
+        audio_config: Option<AudioInfo>,
+        output_height: Option<u32>,
+    ) -> Result<Self, InitError> {
+        Self::init_with_options(
+            output,
+            video_config,
+            audio_config,
+            output_height,
+            BitrateProfile::Compatibility,
+            false,
+        )
     }
 
     pub fn init_instant_mode(
@@ -127,7 +167,14 @@ impl MP4Encoder {
         audio_config: Option<AudioInfo>,
         output_height: Option<u32>,
     ) -> Result<Self, InitError> {
-        Self::init_with_options(output, video_config, audio_config, output_height, true)
+        Self::init_with_options(
+            output,
+            video_config,
+            audio_config,
+            output_height,
+            BitrateProfile::Balanced,
+            true,
+        )
     }
 
     fn init_with_options(
@@ -135,8 +182,10 @@ impl MP4Encoder {
         video_config: VideoInfo,
         audio_config: Option<AudioInfo>,
         output_height: Option<u32>,
+        bitrate_profile: BitrateProfile,
         instant_mode: bool,
     ) -> Result<Self, InitError> {
+        let ultra_quality = matches!(bitrate_profile, BitrateProfile::Ultra);
         info!(
             width = video_config.width,
             height = video_config.height,
@@ -227,16 +276,28 @@ impl MP4Encoder {
             let bitrate = if instant_mode {
                 get_instant_mode_bitrate(output_width as f32, output_height as f32, fps)
             } else {
-                get_average_bitrate(output_width as f32, output_height as f32, fps)
+                match bitrate_profile {
+                    BitrateProfile::Ultra => {
+                        get_ultra_bitrate(output_width as f32, output_height as f32, fps)
+                    }
+                    BitrateProfile::Balanced => {
+                        get_average_bitrate(output_width as f32, output_height as f32, fps)
+                    }
+                    BitrateProfile::Compatibility => {
+                        get_compatibility_bitrate(output_width as f32, output_height as f32, fps)
+                    }
+                }
             };
 
-            debug!(instant_mode, "recording bitrate: {bitrate}");
+            debug!(
+                instant_mode,
+                ?bitrate_profile,
+                "recording bitrate: {bitrate}"
+            );
 
-            let keyframe_interval = if instant_mode {
-                fps as i32
-            } else {
-                (fps * 2.0) as i32
-            };
+            let keyframe_interval = keyframe_interval_for_fps(fps);
+
+            let allow_frame_reordering = ultra_quality && !instant_mode;
 
             output_settings.insert(
                 av::video_settings_keys::compression_props(),
@@ -249,7 +310,7 @@ impl MP4Encoder {
                     ],
                     &[
                         ns::Number::with_f32(bitrate).as_id_ref(),
-                        ns::Number::with_bool(false).as_id_ref(),
+                        ns::Number::with_bool(allow_frame_reordering).as_id_ref(),
                         ns::Number::with_f32(fps).as_id_ref(),
                         ns::Number::with_i32(keyframe_interval).as_id_ref(),
                     ],
@@ -388,6 +449,7 @@ impl MP4Encoder {
             last_audio_end_pts: None,
             last_audio_timescale: None,
             pending_video_frame: None,
+            instant_mode,
         })
     }
 
@@ -449,8 +511,9 @@ impl MP4Encoder {
             self.pause_timestamp = None;
         }
 
-        if let (Some(audio_end_pts), Some(audio_ts)) =
-            (self.last_audio_end_pts, self.last_audio_timescale)
+        if !self.instant_mode
+            && let (Some(audio_end_pts), Some(audio_ts)) =
+                (self.last_audio_end_pts, self.last_audio_timescale)
         {
             let audio_secs = audio_end_pts as f64 / audio_ts as f64;
             let video_secs = timestamp
@@ -473,14 +536,22 @@ impl MP4Encoder {
         if let Some(last_pts) = effective_last_pts
             && pts_duration <= last_pts
         {
-            let frame_duration = self.video_frame_duration();
-            let adjusted_pts = last_pts + frame_duration;
+            // Only true monotonicity violations (ties/backwards) are
+            // corrected, and only by the smallest amount the mp4 timescale
+            // needs. Anything larger re-times legitimate content: a bump
+            // window scaled from the nominal rate treated every frame of a
+            // faster-than-nominal source as an anomaly (a 1000fps camera on
+            // a 30fps config has 1ms deltas), and a large bump outruns the
+            // incoming timestamps so every subsequent frame needs correcting
+            // too, stretching the recording. A tie carries no time — advance
+            // one tick and let the real timestamps take over again.
+            let step = Duration::from_micros(1);
+            let adjusted_pts = last_pts + step;
 
             trace!(
                 ?timestamp,
                 ?last_pts,
                 adjusted_pts = ?adjusted_pts,
-                frame_duration_ns = frame_duration.as_nanos(),
                 "Monotonic video pts correction",
             );
 
@@ -574,37 +645,53 @@ impl MP4Encoder {
             return Err(QueueFrameError::NotReadyForMore);
         }
 
-        let processed_frame: std::borrow::Cow<'_, frame::Audio> =
-            if let Some(resampler) = &mut self.audio_resampler {
-                let mut resampled = frame::Audio::empty();
-                match resampler.run(frame, &mut resampled) {
-                    Ok(_) => {
-                        resampled.set_rate(self.audio_output_rate);
-                        if resampled.samples() == 0 {
-                            warn!(
-                                input_samples = frame.samples(),
-                                input_rate = frame.rate(),
-                                output_rate = self.audio_output_rate,
-                                "Audio resampling produced 0 samples"
-                            );
-                            return Ok(());
-                        }
-                        std::borrow::Cow::Owned(resampled)
-                    }
-                    Err(e) => {
-                        error!(
-                            error = %e,
+        let processed_frame: std::borrow::Cow<'_, frame::Audio> = if let Some(resampler) =
+            &mut self.audio_resampler
+        {
+            let target = *resampler.output();
+            let src_rate = resampler.input().rate.max(1) as u64;
+            let dst_rate = target.rate.max(1) as u64;
+            let pending_output_samples = resampler
+                .delay()
+                .map(|d| d.output.max(0) as u64)
+                .unwrap_or(0);
+            let resampled_from_input = (frame.samples() as u64)
+                .saturating_mul(dst_rate)
+                .div_ceil(src_rate);
+            let capacity = pending_output_samples
+                .saturating_add(resampled_from_input)
+                .saturating_add(16)
+                .min(i32::MAX as u64) as usize;
+
+            let mut resampled = frame::Audio::new(target.format, capacity, target.channel_layout);
+            match resampler.run(frame, &mut resampled) {
+                Ok(_) => {
+                    resampled.set_rate(self.audio_output_rate);
+                    if resampled.samples() == 0 {
+                        warn!(
                             input_samples = frame.samples(),
                             input_rate = frame.rate(),
                             output_rate = self.audio_output_rate,
-                            "Audio resampling failed"
+                            "Audio resampling produced 0 samples"
                         );
-                        return Err(QueueFrameError::ResamplingFailed(e));
+                        return Ok(());
                     }
+                    std::borrow::Cow::Owned(resampled)
                 }
-            } else {
-                std::borrow::Cow::Borrowed(frame)
-            };
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        input_samples = frame.samples(),
+                        input_rate = frame.rate(),
+                        output_rate = self.audio_output_rate,
+                        "Audio resampling failed"
+                    );
+                    return Err(QueueFrameError::ResamplingFailed(e));
+                }
+            }
+        } else {
+            std::borrow::Cow::Borrowed(frame)
+        };
 
         let frame = processed_frame.as_ref();
 
@@ -720,10 +807,8 @@ impl MP4Encoder {
             dts: cm::Time::invalid(),
         };
 
-        let timed_frame = match pending
-            .raw_frame
-            .copy_with_new_timing(&[timing])
-            .or_else(|_| rebuild_video_sample_buf(&pending.raw_frame, timing))
+        let timed_frame = match rebuild_video_sample_buf(&pending.raw_frame, timing)
+            .or_else(|_| pending.raw_frame.copy_with_new_timing(&[timing]))
         {
             Ok(f) => f,
             Err(e) => {
@@ -932,16 +1017,45 @@ fn timescale_value_to_duration(value: i64, timescale: i32) -> Duration {
     Duration::from_nanos(nanos)
 }
 
+const MIN_STUDIO_BITRATE: f32 = 8_000_000.0;
+const MAX_ULTRA_BITRATE: f32 = 120_000_000.0;
+const MIN_COMPATIBILITY_BITRATE: f32 = 2_500_000.0;
+const MAX_COMPATIBILITY_BITRATE: f32 = 10_000_000.0;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum BitrateProfile {
+    Compatibility,
+    #[default]
+    Balanced,
+    Ultra,
+}
+
 fn get_average_bitrate(width: f32, height: f32, fps: f32) -> f32 {
-    5_000_000.0
-        + width * height / (1920.0 * 1080.0) * 2_000_000.0
-        + fps.min(60.0) / 30.0 * 5_000_000.0
+    let pixels = width * height;
+    let fps_factor = fps.min(60.0) / 30.0;
+    (pixels * fps_factor * 5.0).max(MIN_STUDIO_BITRATE)
+}
+
+fn get_ultra_bitrate(width: f32, height: f32, fps: f32) -> f32 {
+    let pixels = width * height;
+    let fps_factor = fps.min(60.0) / 30.0;
+    (pixels * fps_factor * 10.0).clamp(MIN_STUDIO_BITRATE, MAX_ULTRA_BITRATE)
+}
+
+fn get_compatibility_bitrate(width: f32, height: f32, fps: f32) -> f32 {
+    let pixels = width * height;
+    let fps_factor = fps.min(60.0) / 30.0;
+    (pixels * fps_factor * 2.5).clamp(MIN_COMPATIBILITY_BITRATE, MAX_COMPATIBILITY_BITRATE)
 }
 
 fn get_instant_mode_bitrate(width: f32, height: f32, fps: f32) -> f32 {
     let pixel_ratio = width * height / (1920.0 * 1080.0);
     let fps_ratio = fps.min(60.0) / 30.0;
     1_500_000.0 + pixel_ratio * 1_500_000.0 + fps_ratio * 500_000.0
+}
+
+fn keyframe_interval_for_fps(fps: f32) -> i32 {
+    (fps * 0.75).floor().max(1.0) as i32
 }
 
 #[cfg(test)]
@@ -952,6 +1066,13 @@ mod tests {
 
     fn valid_video_config() -> VideoInfo {
         VideoInfo::from_raw(RawVideoFormat::Bgra, 1920, 1080, 30)
+    }
+
+    #[test]
+    fn keyframe_interval_targets_three_quarter_second() {
+        assert_eq!(keyframe_interval_for_fps(30.0), 22);
+        assert_eq!(keyframe_interval_for_fps(60.0), 45);
+        assert_eq!(keyframe_interval_for_fps(1.0), 1);
     }
 
     #[test]
@@ -1404,15 +1525,15 @@ mod tests {
                                     std::thread::sleep(Duration::from_micros(500));
                                 }
                                 Err(QueueFrameError::WriterFailed(err)) => {
-                                    errors.push(format!("WriterFailed at ts={:?}: {err}", ts));
+                                    errors.push(format!("WriterFailed at ts={ts:?}: {err}"));
                                     break;
                                 }
                                 Err(QueueFrameError::Failed) => {
-                                    errors.push(format!("Failed at ts={:?}", ts));
+                                    errors.push(format!("Failed at ts={ts:?}"));
                                     break;
                                 }
                                 Err(QueueFrameError::Finished) => {
-                                    errors.push(format!("Finished at ts={:?}", ts));
+                                    errors.push(format!("Finished at ts={ts:?}"));
                                     break;
                                 }
                                 Err(e) => {
@@ -1521,6 +1642,147 @@ mod tests {
         }
     }
 
+    fn container_duration_secs(path: &PathBuf) -> f64 {
+        let input = ffmpeg::format::input(path).expect("open encoded output");
+        let duration = input.duration();
+        assert!(duration > 0, "container has no duration");
+        duration as f64 / ffmpeg::ffi::AV_TIME_BASE as f64
+    }
+
+    /// A source delivering 60fps into a pipeline that believes 30fps used to
+    /// reach the encoder as a non-monotonic sawtooth (the smoothing ladder
+    /// re-timed 4 of every 5 frames to the nominal cadence, then dropped back
+    /// to the source clock). The encoder's monotonic pts correction then
+    /// bumped every "backwards" frame a full nominal frame duration forward,
+    /// locking into nominal-CFR output and doubling the recording's length.
+    /// The encoder must keep the written duration close to the real span even
+    /// for such inputs.
+    #[test]
+    fn non_monotonic_sawtooth_input_does_not_stretch_duration() {
+        let output = test_output_path("sawtooth_duration");
+        let config = VideoInfo::from_raw(RawVideoFormat::Nv12, 640, 360, 30);
+        let mut encoder = MP4Encoder::init(output.clone(), config, None, None).unwrap();
+        let pool = create_pixel_buffer_pool(640, 360);
+
+        const REAL_DELTA_US: i64 = 16_667; // 60fps delivery
+        const NOMINAL_DELTA_US: i64 = 33_333; // 30fps belief
+        const FRAMES: i64 = 300; // 5s of real time
+
+        let mut expected: Option<i64> = None;
+        for i in 0..FRAMES {
+            let raw_us = i * REAL_DELTA_US;
+            // Reproduce the legacy smoothing ladder's output.
+            let ts_us = match expected {
+                Some(exp) if (exp - raw_us).abs() < 70_000 => exp,
+                _ => raw_us,
+            };
+            expected = Some(ts_us + NOMINAL_DELTA_US);
+
+            let frame = create_test_video_frame(&pool, ts_us, REAL_DELTA_US);
+            let timestamp = Duration::from_micros(ts_us.max(0) as u64);
+            loop {
+                match encoder.queue_video_frame(frame.clone(), timestamp) {
+                    Ok(()) => break,
+                    Err(QueueFrameError::NotReadyForMore) => {
+                        std::thread::sleep(Duration::from_micros(500));
+                    }
+                    Err(e) => panic!("queue failed at frame {i}: {e}"),
+                }
+            }
+        }
+
+        let real_span_secs = (FRAMES * REAL_DELTA_US) as f64 / 1_000_000.0;
+        encoder
+            .finish(Some(Duration::from_micros((FRAMES * REAL_DELTA_US) as u64)))
+            .unwrap();
+
+        let duration_secs = container_duration_secs(&output);
+        let _ = std::fs::remove_file(&output);
+
+        assert!(
+            duration_secs < real_span_secs * 1.25,
+            "encoded duration {duration_secs:.2}s stretched beyond real span {real_span_secs:.2}s"
+        );
+        assert!(
+            duration_secs > real_span_secs * 0.75,
+            "encoded duration {duration_secs:.2}s collapsed below real span {real_span_secs:.2}s"
+        );
+    }
+
+    /// Encodes `span_secs` of clean `actual_fps` timestamps into an encoder
+    /// configured for `config_fps` and asserts the written duration matches
+    /// the real span — the configured rate only sizes bitrate/keyframes, it
+    /// must never re-time content delivered at a different rate.
+    fn assert_duration_tracks_input(actual_fps: f64, config_fps: u32, span_secs: f64) {
+        let output = test_output_path(&format!(
+            "duration_tracks_{}fps_in_{}cfg",
+            actual_fps.round() as u64,
+            config_fps
+        ));
+        let config = VideoInfo::from_raw(RawVideoFormat::Nv12, 640, 360, config_fps);
+        let mut encoder = MP4Encoder::init(output.clone(), config, None, None).unwrap();
+        let pool = create_pixel_buffer_pool(640, 360);
+
+        let real_delta_us = 1_000_000.0 / actual_fps;
+        let frames = (span_secs * actual_fps) as i64;
+
+        for i in 0..frames {
+            let ts_us = (i as f64 * real_delta_us) as i64;
+            let frame = create_test_video_frame(&pool, ts_us, real_delta_us as i64);
+            loop {
+                match encoder.queue_video_frame(frame.clone(), Duration::from_micros(ts_us as u64))
+                {
+                    Ok(()) => break,
+                    Err(QueueFrameError::NotReadyForMore) => {
+                        std::thread::sleep(Duration::from_micros(500));
+                    }
+                    Err(e) => panic!(
+                        "[{actual_fps}fps into {config_fps}cfg] queue failed at frame {i}: {e}"
+                    ),
+                }
+            }
+        }
+
+        let real_span_secs = (frames as f64 * real_delta_us) / 1_000_000.0;
+        encoder
+            .finish(Some(Duration::from_secs_f64(real_span_secs)))
+            .unwrap();
+
+        let duration_secs = container_duration_secs(&output);
+        let _ = std::fs::remove_file(&output);
+
+        assert!(
+            (duration_secs - real_span_secs).abs() < real_span_secs * 0.1,
+            "[{actual_fps}fps into {config_fps}cfg] encoded duration {duration_secs:.2}s \
+             should match real span {real_span_secs:.2}s"
+        );
+    }
+
+    /// Clean 60fps timestamps with a 30fps-configured encoder must be written
+    /// at their real times.
+    #[test]
+    fn faster_than_nominal_monotonic_input_keeps_real_duration() {
+        assert_duration_tracks_input(60.0, 30, 5.0);
+    }
+
+    /// Whatever rate frames actually arrive at — down to slow trickles and up
+    /// to a 1000fps camera — the encoder must write them at their real times.
+    #[test]
+    fn encoder_duration_tracks_input_across_fps_matrix() {
+        assert_duration_tracks_input(15.0, 30, 3.0);
+        assert_duration_tracks_input(24.0, 30, 3.0);
+        assert_duration_tracks_input(120.0, 30, 2.0);
+        assert_duration_tracks_input(240.0, 30, 1.5);
+        assert_duration_tracks_input(1000.0, 30, 1.2);
+        assert_duration_tracks_input(1000.0, 60, 1.2);
+        // Seeded-random rate: an arbitrary camera cadence nothing was tuned
+        // for.
+        let random_fps = 5.0
+            + (0x5EEDu64.wrapping_mul(6364136223846793005) >> 11) as f64 / (1u64 << 53) as f64
+                * 995.0;
+        assert_duration_tracks_input(random_fps, 30, 1.5);
+    }
+
     #[test]
     fn realistic_retina_instant_mode_10s() {
         let output = test_output_path("realistic_retina_10s");
@@ -1578,13 +1840,11 @@ mod tests {
 
         assert!(
             v_errors.is_empty(),
-            "Video encoding errors: {:?} (appended={v_appended}, dropped={v_dropped})",
-            v_errors
+            "Video encoding errors: {v_errors:?} (appended={v_appended}, dropped={v_dropped})"
         );
         assert!(
             a_errors.is_empty(),
-            "Audio encoding errors: {:?} (appended={a_appended}, dropped={a_dropped})",
-            a_errors
+            "Audio encoding errors: {a_errors:?} (appended={a_appended}, dropped={a_dropped})"
         );
 
         assert!(
@@ -1654,13 +1914,11 @@ mod tests {
 
         assert!(
             v_errors.is_empty(),
-            "Video errors during clock drift: {:?}",
-            v_errors
+            "Video errors during clock drift: {v_errors:?}"
         );
         assert!(
             a_errors.is_empty(),
-            "Audio errors during clock drift: {:?}",
-            a_errors
+            "Audio errors during clock drift: {a_errors:?}"
         );
         assert!(v_appended >= total_video_frames / 2);
         assert!(a_appended >= total_audio_frames / 2);
@@ -1738,13 +1996,11 @@ mod tests {
 
         assert!(
             v_errors.is_empty(),
-            "Video errors with frame drops: {:?} (appended={v_appended}, dropped={v_dropped})",
-            v_errors
+            "Video errors with frame drops: {v_errors:?} (appended={v_appended}, dropped={v_dropped})"
         );
         assert!(
             a_errors.is_empty(),
-            "Audio errors with frame drops: {:?}",
-            a_errors
+            "Audio errors with frame drops: {a_errors:?}"
         );
         assert!(
             v_appended >= video_timestamps.len() as u64 / 2,
@@ -1812,10 +2068,9 @@ mod tests {
 
         assert!(
             v_errors.is_empty(),
-            "Video errors with backward timestamps: {:?}",
-            v_errors
+            "Video errors with backward timestamps: {v_errors:?}"
         );
-        assert!(a_errors.is_empty(), "Audio errors: {:?}", a_errors);
+        assert!(a_errors.is_empty(), "Audio errors: {a_errors:?}");
         assert!(v_appended >= 50);
         assert!(a_appended >= 20);
 
@@ -1830,8 +2085,8 @@ mod tests {
     }
 
     #[test]
-    fn video_ahead_of_audio_throttled() {
-        let output = test_output_path("video_ahead_audio");
+    fn instant_mode_video_advances_past_drift_threshold() {
+        let output = test_output_path("instant_video_past_drift");
         let video = valid_video_config();
         let audio = wireless_audio_config();
 
@@ -1845,24 +2100,78 @@ mod tests {
             .queue_audio_frame(&first_audio, Duration::ZERO)
             .unwrap();
 
-        let mut throttled_count = 0u64;
+        let mut accepted_past_threshold = 0u64;
+        let threshold_ms = (MAX_AV_DRIFT_SECS * 1000.0) as u64 + 500;
+
+        for i in 0..60u64 {
+            let ts_ms = i * 100;
+            let timestamp = Duration::from_millis(ts_ms);
+            let frame = create_test_video_frame(&pool, (ts_ms as i64) * 1000, 100_000);
+
+            let mut retries = 0u32;
+            loop {
+                let result = encoder.queue_video_frame(frame.clone(), timestamp);
+                match result {
+                    Ok(()) => {
+                        if ts_ms > threshold_ms {
+                            accepted_past_threshold += 1;
+                        }
+                        break;
+                    }
+                    Err(QueueFrameError::NotReadyForMore) => {
+                        retries += 1;
+                        if retries > 50 {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(e) => panic!("Video encode failed at frame {i}: {e}"),
+                }
+            }
+        }
+
+        assert!(
+            accepted_past_threshold > 0,
+            "Instant mode: video frames must be accepted past the {MAX_AV_DRIFT_SECS}s drift threshold"
+        );
+
+        let _ = encoder.finish(Some(Duration::from_secs(7)));
+        let _ = std::fs::remove_file(&output);
+    }
+
+    #[test]
+    fn non_instant_mode_video_throttled_by_audio_drift() {
+        let output = test_output_path("non_instant_video_throttled");
+        let video = valid_video_config();
+        let audio = wireless_audio_config();
+
+        let mut encoder = MP4Encoder::init(output.clone(), video, Some(audio), None).unwrap();
+
+        let pool = create_pixel_buffer_pool(1920, 1080);
+
+        let first_audio = create_test_audio_frame(48000, 1024);
+        encoder
+            .queue_audio_frame(&first_audio, Duration::ZERO)
+            .unwrap();
+
+        let mut accepted_past_threshold = 0u64;
+        let threshold_ms = (MAX_AV_DRIFT_SECS * 1000.0) as u64 + 500;
+
         for i in 0..200u64 {
             let ts_ms = i * 33;
             let timestamp = Duration::from_millis(ts_ms);
             let frame = create_test_video_frame(&pool, (ts_ms as i64) * 1000, 33_333);
 
-            match encoder.queue_video_frame(frame, timestamp) {
-                Ok(()) => {}
-                Err(QueueFrameError::NotReadyForMore) => {
-                    throttled_count += 1;
-                }
-                Err(e) => panic!("Video encode failed at frame {i}: {e}"),
+            if let Ok(()) = encoder.queue_video_frame(frame, timestamp)
+                && ts_ms > threshold_ms
+            {
+                accepted_past_threshold += 1;
             }
         }
 
-        assert!(
-            throttled_count > 0,
-            "Expected video frames to be throttled when ahead of audio"
+        assert_eq!(
+            accepted_past_threshold, 0,
+            "Non-instant mode: no video frames should be accepted past the {MAX_AV_DRIFT_SECS}s drift threshold"
         );
 
         let _ = encoder.finish(Some(Duration::from_secs(7)));
@@ -1899,16 +2208,8 @@ mod tests {
         let (v_appended, _, v_errors) = video_handle.join().unwrap();
         let (_a_appended, _, a_errors) = audio_handle.join().unwrap();
 
-        assert!(
-            v_errors.is_empty(),
-            "Video errors after gap: {:?}",
-            v_errors
-        );
-        assert!(
-            a_errors.is_empty(),
-            "Audio errors after gap: {:?}",
-            a_errors
-        );
+        assert!(v_errors.is_empty(), "Video errors after gap: {v_errors:?}");
+        assert!(a_errors.is_empty(), "Audio errors after gap: {a_errors:?}");
         assert!(v_appended >= 30);
 
         let result = harness
@@ -1973,7 +2274,7 @@ mod tests {
                         cidre::ns::Number::with_f32(bitrate).as_id_ref(),
                         cidre::ns::Number::with_bool(false).as_id_ref(),
                         cidre::ns::Number::with_f32(fps).as_id_ref(),
-                        cidre::ns::Number::with_i32(fps as i32).as_id_ref(),
+                        cidre::ns::Number::with_i32(keyframe_interval_for_fps(fps)).as_id_ref(),
                     ],
                 )
                 .as_id_ref(),
@@ -2194,17 +2495,14 @@ mod tests {
         for w in new_appended.windows(2) {
             assert!(
                 w[1] > w[0],
-                "NEW behavior must produce monotonic PTS: {:?}",
-                new_appended
+                "NEW behavior must produce monotonic PTS: {new_appended:?}"
             );
         }
 
         assert!(
             old_appended != new_appended,
             "Old and new should produce different PTS after failed append with offset. \
-             Old: {:?}, New: {:?}",
-            old_appended,
-            new_appended
+             Old: {old_appended:?}, New: {new_appended:?}"
         );
 
         let old_jump = old_appended[5] - old_appended[4];
@@ -2289,7 +2587,7 @@ mod tests {
                         cidre::ns::Number::with_f32(bitrate).as_id_ref(),
                         cidre::ns::Number::with_bool(false).as_id_ref(),
                         cidre::ns::Number::with_f32(fps).as_id_ref(),
-                        cidre::ns::Number::with_i32(fps as i32).as_id_ref(),
+                        cidre::ns::Number::with_i32(keyframe_interval_for_fps(fps)).as_id_ref(),
                     ],
                 )
                 .as_id_ref(),
@@ -2890,8 +3188,7 @@ mod tests {
 
         assert!(
             post_jump_errors.is_empty(),
-            "Post-jump video frames should succeed (drift guard or recovery): {:?}",
-            post_jump_errors
+            "Post-jump video frames should succeed (drift guard or recovery): {post_jump_errors:?}"
         );
     }
 
@@ -2939,13 +3236,11 @@ mod tests {
 
         assert!(
             v_errors.is_empty(),
-            "Video errors in max throughput: {:?}",
-            v_errors
+            "Video errors in max throughput: {v_errors:?}"
         );
         assert!(
             a_errors.is_empty(),
-            "Audio errors in max throughput: {:?}",
-            a_errors
+            "Audio errors in max throughput: {a_errors:?}"
         );
 
         let result = harness
@@ -3025,13 +3320,11 @@ mod tests {
 
         assert!(
             v_errors.is_empty(),
-            "Video errors in AV interleave stress: {:?}",
-            v_errors
+            "Video errors in AV interleave stress: {v_errors:?}"
         );
         assert!(
             a_errors.is_empty(),
-            "Audio errors in AV interleave stress: {:?}",
-            a_errors
+            "Audio errors in AV interleave stress: {a_errors:?}"
         );
 
         assert!(v_appended >= total_video_frames / 3);
@@ -3128,13 +3421,11 @@ mod tests {
 
         assert!(
             v_errors.is_empty(),
-            "Video encoding errors in 65s test: {:?} (appended={v_appended}, dropped={v_dropped})",
-            v_errors
+            "Video encoding errors in 65s test: {v_errors:?} (appended={v_appended}, dropped={v_dropped})"
         );
         assert!(
             a_errors.is_empty(),
-            "Audio encoding errors in 65s test: {:?} (appended={a_appended}, dropped={a_dropped})",
-            a_errors
+            "Audio encoding errors in 65s test: {a_errors:?} (appended={a_appended}, dropped={a_dropped})"
         );
 
         assert!(
@@ -3246,13 +3537,11 @@ mod tests {
 
         assert!(
             v_errors.is_empty(),
-            "Video errors in user-scenario test: {:?} (appended={v_appended}, dropped={v_dropped})",
-            v_errors
+            "Video errors in user-scenario test: {v_errors:?} (appended={v_appended}, dropped={v_dropped})"
         );
         assert!(
             a_errors.is_empty(),
-            "Audio errors in user-scenario test: {:?} (appended={a_appended}, dropped={a_dropped})",
-            a_errors
+            "Audio errors in user-scenario test: {a_errors:?} (appended={a_appended}, dropped={a_dropped})"
         );
 
         assert!(
@@ -3345,11 +3634,52 @@ mod tests {
 
         assert!(
             errors.is_empty(),
-            "Sandwich PTS frames should not trigger -16364: {:?}",
-            errors
+            "Sandwich PTS frames should not trigger -16364: {errors:?}"
         );
 
         let _ = encoder.finish(Some(Duration::from_secs(15)));
+        let _ = std::fs::remove_file(&output);
+    }
+
+    #[test]
+    fn regression_tiny_positive_pts_step_is_expanded() {
+        let output = test_output_path("tiny_positive_pts_step");
+        let video = valid_video_config();
+
+        let mut encoder = MP4Encoder::init(output.clone(), video, None, None).unwrap();
+        let pool = create_pixel_buffer_pool(1920, 1080);
+
+        let timestamps = [0u64, 33_333, 33_334, 66_666, 100_000, 133_333];
+        let mut errors = Vec::new();
+
+        for ts_us in timestamps {
+            let frame = create_test_video_frame(&pool, ts_us as i64, 33_333);
+            match encoder.queue_video_frame(frame, Duration::from_micros(ts_us)) {
+                Ok(()) => {}
+                Err(QueueFrameError::WriterFailed(e)) => {
+                    errors.push(format!("WriterFailed at {ts_us}: {e}"));
+                    break;
+                }
+                Err(QueueFrameError::Failed) => {
+                    errors.push(format!("Failed at {ts_us}"));
+                    break;
+                }
+                Err(QueueFrameError::Finished) => {
+                    errors.push(format!("Finished at {ts_us}"));
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+
+        assert!(
+            errors.is_empty(),
+            "Tiny positive PTS steps should not reach AVFoundation: {errors:?}"
+        );
+
+        let result = encoder.finish(Some(Duration::from_micros(166_666)));
+        assert!(result.is_ok(), "Finish failed: {result:?}");
+
         let _ = std::fs::remove_file(&output);
     }
 
@@ -3469,15 +3799,13 @@ mod tests {
 
         assert!(
             v_errors.is_empty(),
-            "Video errors in repeated sandwich 65s test: {:?} \
-             (appended={v_appended}, dropped={v_dropped})",
-            v_errors
+            "Video errors in repeated sandwich 65s test: {v_errors:?} \
+             (appended={v_appended}, dropped={v_dropped})"
         );
         assert!(
             a_errors.is_empty(),
-            "Audio errors in repeated sandwich 65s test: {:?} \
-             (appended={a_appended}, dropped={a_dropped})",
-            a_errors
+            "Audio errors in repeated sandwich 65s test: {a_errors:?} \
+             (appended={a_appended}, dropped={a_dropped})"
         );
 
         assert!(

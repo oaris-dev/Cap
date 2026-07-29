@@ -1,4 +1,5 @@
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::oneshot;
@@ -7,6 +8,34 @@ use wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 use crate::{ProjectUniforms, RenderingError};
 
 const GPU_BUFFER_WAIT_TIMEOUT_SECS: u64 = 10;
+const SOFTWARE_GPU_BUFFER_WAIT_TIMEOUT_SECS: u64 = 60;
+
+/// Whether this process has selected a software (CPU rasterizer) wgpu adapter.
+/// Software adapters like Windows WARP legitimately take tens of seconds for the
+/// first cold render (pipeline compilation + full-frame rasterization on the CPU),
+/// so readback waits get a much longer deadline before being treated as failures —
+/// timing out the first frame is what used to leave the editor on a blank screen.
+static SOFTWARE_ADAPTER_IN_USE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn note_software_adapter_in_use() {
+    SOFTWARE_ADAPTER_IN_USE.store(true, Ordering::Release);
+}
+
+fn gpu_buffer_wait_timeout() -> std::time::Duration {
+    let secs = if SOFTWARE_ADAPTER_IN_USE.load(Ordering::Acquire) {
+        SOFTWARE_GPU_BUFFER_WAIT_TIMEOUT_SECS
+    } else {
+        GPU_BUFFER_WAIT_TIMEOUT_SECS
+    };
+    std::time::Duration::from_secs(secs)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FinishEncoderTimings {
+    pub wait_previous_duration: std::time::Duration,
+    pub resize_duration: std::time::Duration,
+    pub submit_readback_duration: std::time::Duration,
+}
 
 pub struct NV12BufferPool {
     buffers: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -409,7 +438,7 @@ impl PendingNv12Readback {
 
         let mut poll_count = 0u32;
         let start_time = Instant::now();
-        let timeout_duration = std::time::Duration::from_secs(GPU_BUFFER_WAIT_TIMEOUT_SECS);
+        let timeout_duration = gpu_buffer_wait_timeout();
 
         loop {
             if start_time.elapsed() > timeout_duration {
@@ -538,7 +567,7 @@ impl PendingReadback {
     pub async fn wait(mut self, device: &wgpu::Device) -> Result<RenderedFrame, RenderingError> {
         let mut poll_count = 0u32;
         let start_time = Instant::now();
-        let timeout_duration = std::time::Duration::from_secs(GPU_BUFFER_WAIT_TIMEOUT_SECS);
+        let timeout_duration = gpu_buffer_wait_timeout();
 
         loop {
             if start_time.elapsed() > timeout_duration {
@@ -547,7 +576,7 @@ impl PendingReadback {
                     elapsed_secs = start_time.elapsed().as_secs(),
                     poll_count = poll_count,
                     "GPU buffer mapping timed out after {}s",
-                    GPU_BUFFER_WAIT_TIMEOUT_SECS
+                    timeout_duration.as_secs()
                 );
                 return Err(self.cancel());
             }
@@ -952,13 +981,31 @@ pub async fn finish_encoder(
     uniforms: &ProjectUniforms,
     encoder: wgpu::CommandEncoder,
 ) -> Result<Option<RenderedFrame>, RenderingError> {
+    finish_encoder_timed(session, device, queue, uniforms, encoder)
+        .await
+        .map(|(frame, _)| frame)
+}
+
+pub async fn finish_encoder_timed(
+    session: &mut RenderSession,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    uniforms: &ProjectUniforms,
+    encoder: wgpu::CommandEncoder,
+) -> Result<(Option<RenderedFrame>, FinishEncoderTimings), RenderingError> {
+    let mut timings = FinishEncoderTimings::default();
+
+    let wait_start = Instant::now();
     let previous_frame = if let Some(prev) = session.pipelined_readback.take_pending() {
         Some(prev.wait(device).await?)
     } else {
         None
     };
+    timings.wait_previous_duration = wait_start.elapsed();
 
+    let resize_start = Instant::now();
     session.pipelined_readback.perform_resize_if_needed(device);
+    timings.resize_duration = resize_start.elapsed();
 
     let texture = if session.current_is_left {
         &session.textures.0
@@ -966,11 +1013,13 @@ pub async fn finish_encoder(
         &session.textures.1
     };
 
+    let submit_start = Instant::now();
     session
         .pipelined_readback
         .submit_readback(device, queue, texture, uniforms, encoder)?;
+    timings.submit_readback_duration = submit_start.elapsed();
 
-    Ok(previous_frame)
+    Ok((previous_frame, timings))
 }
 
 pub async fn finish_encoder_nv12_pooled(

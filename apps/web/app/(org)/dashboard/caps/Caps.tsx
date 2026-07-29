@@ -1,7 +1,9 @@
 "use client";
 
+import type { videos as videosSchema } from "@cap/database/schema";
 import type { VideoMetadata } from "@cap/database/types";
 import { Button } from "@cap/ui";
+import type { SpaceRuleSource, ViewerSettingKey } from "@cap/web-backend";
 import type { ImageUpload, Video } from "@cap/web-domain";
 import { faFolderPlus, faInfoCircle } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -9,6 +11,8 @@ import { Effect, Exit } from "effect";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { ChromeRecorderButton } from "@/components/ChromeRecorderButton";
+import { CHROME_EXTENSION_BUTTON_CLASS } from "@/lib/chrome-extension";
 import { useEffectMutation, useRpcClient } from "@/lib/EffectRuntime";
 import { useVideosAnalyticsQuery } from "@/lib/Queries/Analytics";
 import { useDashboardContext } from "../Contexts";
@@ -45,11 +49,20 @@ export type VideoData = {
 		name: string;
 		isOrg: boolean;
 		organizationId: string;
+		iconUrl?: ImageUpload.ImageUrl | null;
+		settings?: Partial<Record<ViewerSettingKey, boolean>> | null;
+		hasPassword?: boolean;
 	}[];
 	ownerName: string;
 	metadata?: VideoMetadata;
+	source: typeof videosSchema.$inferSelect.source;
+	isScreenshot: boolean;
 	hasPassword: boolean;
+	hasInheritedPassword?: boolean;
+	inheritedPasswordSources?: SpaceRuleSource[];
+	inheritedSpaceSettings?: Partial<Record<ViewerSettingKey, SpaceRuleSource[]>>;
 	hasActiveUpload: boolean;
+	settings?: Partial<Record<ViewerSettingKey, boolean>> | null;
 }[];
 
 export const Caps = ({
@@ -73,6 +86,7 @@ export const Caps = ({
 	const previousCountRef = useRef<number>(0);
 	const [selectedCaps, setSelectedCaps] = useState<Video.VideoId[]>([]);
 	const [isDraggingCap, setIsDraggingCap] = useState(false);
+	const moveLocation = { type: "personal" } as const;
 
 	const anyCapSelected = selectedCaps.length > 0;
 
@@ -253,6 +267,9 @@ export const Caps = ({
 				</Button>
 				<UploadCapButton size="sm" />
 				<WebRecorderDialog />
+				<ChromeRecorderButton
+					className={`${CHROME_EXTENSION_BUTTON_CLASS} font-medium`}
+				/>
 			</div>
 			{folders.length > 0 && (
 				<>
@@ -261,7 +278,12 @@ export const Caps = ({
 					</div>
 					<div className="grid grid-cols-[repeat(auto-fill,minmax(250px,1fr))] gap-4 mb-10">
 						{folders.map((folder) => (
-							<Folder key={folder.id} {...folder} />
+							<Folder
+								key={folder.id}
+								{...folder}
+								canMove
+								moveRootLabel="My Caps"
+							/>
 						))}
 					</div>
 				</>
@@ -269,7 +291,9 @@ export const Caps = ({
 			{visibleVideos.length > 0 && (
 				<>
 					<div className="flex justify-between items-center mb-6 w-full">
-						<h1 className="text-2xl font-medium text-gray-12">Videos</h1>
+						<h1 className="text-2xl font-medium text-gray-12">
+							Videos and screenshots
+						</h1>
 					</div>
 
 					<div className="grid grid-cols-1 gap-4 sm:gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
@@ -295,6 +319,9 @@ export const Caps = ({
 									isSelected={selectedCaps.includes(video.id)}
 									anyCapSelected={anyCapSelected}
 									onSelectToggle={() => handleCapSelection(video.id)}
+									canMove
+									moveLocation={moveLocation}
+									moveRootLabel="My Caps"
 								/>
 							);
 						})}
@@ -311,6 +338,8 @@ export const Caps = ({
 				setSelectedCaps={setSelectedCaps}
 				deleteSelectedCaps={() => deleteCaps(selectedCaps)}
 				isDeleting={isDeletingCaps || isDeletingCap}
+				moveLocation={moveLocation}
+				moveRootLabel="My Caps"
 			/>
 			{isDraggingCap && (
 				<div className="fixed inset-0 z-50 pointer-events-none">

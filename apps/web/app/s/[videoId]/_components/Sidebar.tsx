@@ -45,6 +45,7 @@ interface SidebarProps {
 		aiGenerationStatus?: AiGenerationStatus | null;
 	} | null;
 	aiGenerationEnabled?: boolean;
+	isScreenshot?: boolean;
 }
 
 const TabContent = motion.div;
@@ -85,6 +86,7 @@ export const Sidebar = forwardRef<{ scrollToBottom: () => void }, SidebarProps>(
 			onSeek,
 			aiData,
 			aiGenerationEnabled = false,
+			isScreenshot = false,
 		},
 		ref,
 	) => {
@@ -95,18 +97,18 @@ export const Sidebar = forwardRef<{ scrollToBottom: () => void }, SidebarProps>(
 			isOwner || (user && data.organizationMembers?.includes(user.id)),
 		);
 
-		const defaultTab = !(
-			videoSettings?.disableComments ?? data.orgSettings?.disableComments
-		)
-			? "activity"
-			: !(videoSettings?.disableSummary ?? data.orgSettings?.disableSummary)
-				? "summary"
-				: !(
-							videoSettings?.disableTranscript ??
-							data.orgSettings?.disableTranscript
-						)
-					? "transcript"
-					: "activity";
+		const defaultTab =
+			isScreenshot ||
+			!(videoSettings?.disableComments ?? data.orgSettings?.disableComments)
+				? "activity"
+				: !(videoSettings?.disableSummary ?? data.orgSettings?.disableSummary)
+					? "summary"
+					: !(
+								videoSettings?.disableTranscript ??
+								data.orgSettings?.disableTranscript
+							)
+						? "transcript"
+						: "activity";
 
 		const [activeTab, setActiveTab] = useState<TabType>(defaultTab);
 		const [[page, direction], setPage] = useState([0, 0]);
@@ -118,19 +120,24 @@ export const Sidebar = forwardRef<{ scrollToBottom: () => void }, SidebarProps>(
 				disabled:
 					videoSettings?.disableComments ?? data.orgSettings?.disableComments,
 			},
-			{
-				id: "summary",
-				label: t("sidebar.summary"),
-				disabled:
-					videoSettings?.disableSummary ?? data.orgSettings?.disableSummary,
-			},
-			{
-				id: "transcript",
-				label: t("sidebar.transcript"),
-				disabled:
-					videoSettings?.disableTranscript ??
-					data.orgSettings?.disableTranscript,
-			},
+			...(isScreenshot
+				? []
+				: [
+						{
+							id: "summary",
+							label: t("sidebar.summary"),
+							disabled:
+								videoSettings?.disableSummary ??
+								data.orgSettings?.disableSummary,
+						},
+						{
+							id: "transcript",
+							label: t("sidebar.transcript"),
+							disabled:
+								videoSettings?.disableTranscript ??
+								data.orgSettings?.disableTranscript,
+						},
+					]),
 		];
 
 		const paginate = (tabId: TabType) => {

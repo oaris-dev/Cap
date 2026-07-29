@@ -1,5 +1,6 @@
 import { db } from "@cap/database";
 import { getCurrentUser } from "@cap/database/auth/session";
+import { nanoIdLength } from "@cap/database/helpers";
 import {
 	comments,
 	organizationMembers,
@@ -8,22 +9,25 @@ import {
 	spaces,
 	spaceVideos,
 	users,
+	videoEdits,
 	videos,
 	videoUploads,
 } from "@cap/database/schema";
 import type { VideoMetadata } from "@cap/database/types";
-import { buildEnv } from "@cap/env";
+import { buildEnv, serverEnv } from "@cap/env";
 import { Logo } from "@cap/ui";
 import { userIsPro } from "@cap/utils";
 import {
 	Database,
 	ImageUploads,
 	provideOptionalAuth,
+	resolveEffectiveVideoRules,
 	Videos,
 } from "@cap/web-backend";
 import { VideosPolicy } from "@cap/web-backend/src/Videos/VideosPolicy";
 import {
 	Comment,
+	type ImageUpload,
 	type Organisation,
 	Policy,
 	type Video,
@@ -40,16 +44,56 @@ import {
 	type OrganizationSettings,
 } from "@/app/(org)/dashboard/dashboard-data";
 import { OarisLogo } from "@/components/OarisLogo";
+import { completeDesktopSegmentsManifestAndQueue } from "@/lib/desktop-segments-recovery";
 import { createNotification } from "@/lib/Notification";
+import {
+	canManageOrganizationSettings,
+	getEffectiveOrganizationRole,
+} from "@/lib/permissions/roles";
+import { resolveDefaultPlaybackSpeed } from "@/lib/playback-speed";
 import * as EffectRuntime from "@/lib/server";
 import { runPromise } from "@/lib/server";
+import { getSharePageBranding } from "@/lib/share-branding";
+import { getSharePlayerUrl } from "@/lib/share-player-url";
+import {
+	isSocialCrawlerUserAgent,
+	SOCIAL_REFERRER_DOMAINS,
+} from "@/lib/social-crawlers";
 import { transcribeVideo } from "@/lib/transcribe";
 import { t } from "@/lib/translations";
+import { canUserDownloadVideo } from "@/lib/video-download-permissions";
+import {
+	isEditSourceKey,
+	reconcileStaleEditUpload,
+} from "@/lib/video-edit-processing";
+import {
+	areEditSpecsEquivalent,
+	createIdentityEditSpec,
+} from "@/lib/video-edits";
 import { optionFromTOrFirst } from "@/utils/effect";
 import { isAiGenerationEnabled } from "@/utils/flags";
 import { PasswordOverlay } from "./_components/PasswordOverlay";
+import { PendingRecordingShare } from "./_components/PendingRecordingShare";
 import { ShareHeader } from "./_components/ShareHeader";
 import { Share } from "./Share";
+
+const VIEW_NOTIFICATION_DELAY_MS = 2 * 60 * 1000;
+const VIDEO_ID_PATTERN = /^[0-9abcdefghjkmnpqrstvwxyz]+$/;
+
+type ShareVideoSearchParams = {
+	[key: string]: string | string[] | undefined;
+};
+
+const isValidVideoIdParam = (videoId: string) =>
+	videoId.length === nanoIdLength && VIDEO_ID_PATTERN.test(videoId);
+
+const hasRecordingStoppedParam = (searchParams: ShareVideoSearchParams) => {
+	const recordingStoppedParam = Array.isArray(searchParams.recordingStopped)
+		? searchParams.recordingStopped[0]
+		: searchParams.recordingStopped;
+
+	return recordingStoppedParam === "1" || recordingStoppedParam === "true";
+};
 
 // Helper function to fetch shared spaces data for a video
 async function getSharedSpacesForVideo(videoId: Video.VideoId) {
@@ -59,7 +103,9 @@ async function getSharedSpacesForVideo(videoId: Video.VideoId) {
 			id: spaces.id,
 			name: spaces.name,
 			organizationId: spaces.organizationId,
-			iconUrl: organizations.iconUrl,
+			iconUrl: spaces.iconUrl,
+			settings: spaces.settings,
+			hasPassword: sql`${spaces.password} IS NOT NULL`.mapWith(Boolean),
 		})
 		.from(spaceVideos)
 		.innerJoin(spaces, eq(spaceVideos.spaceId, spaces.id))
@@ -83,6 +129,8 @@ async function getSharedSpacesForVideo(videoId: Video.VideoId) {
 		name: string;
 		organizationId: string;
 		iconUrl?: string;
+		settings?: OrganizationSettings | null;
+		hasPassword?: boolean;
 	}> = [];
 
 	// Add space-level sharing
@@ -92,6 +140,8 @@ async function getSharedSpacesForVideo(videoId: Video.VideoId) {
 			name: space.name,
 			organizationId: space.organizationId,
 			iconUrl: space.iconUrl || undefined,
+			settings: space.settings,
+			hasPassword: space.hasPassword,
 		});
 	});
 
@@ -102,6 +152,8 @@ async function getSharedSpacesForVideo(videoId: Video.VideoId) {
 			name: org.name,
 			organizationId: org.organizationId,
 			iconUrl: org.iconUrl || undefined,
+			settings: null,
+			hasPassword: false,
 		});
 	});
 
@@ -177,24 +229,38 @@ function PolicyDeniedView({ reason }: { reason?: string }) {
 const renderPolicyDenied = (videoId: Video.VideoId, reason?: string) =>
 	Effect.succeed(<PolicyDeniedView key={videoId} reason={reason} />);
 
-const renderNoSuchElement = () => Effect.sync(() => notFound());
+const renderNoSuchElement = (awaitRecording: boolean) =>
+	awaitRecording
+		? Effect.succeed(<PendingRecordingShare />)
+		: Effect.sync(() => notFound());
 
-const getShareVideoPageCatchers = (videoId: Video.VideoId) => ({
+const getShareVideoPageCatchers = (
+	videoId: Video.VideoId,
+	awaitRecording: boolean,
+) => ({
 	PolicyDenied: (e: Policy.PolicyDeniedError) =>
 		renderPolicyDenied(videoId, e.reason),
-	NoSuchElementException: renderNoSuchElement,
+	NoSuchElementException: () => renderNoSuchElement(awaitRecording),
 });
 
 export async function generateMetadata(
 	props: PageProps<"/s/[videoId]">,
 ): Promise<Metadata> {
 	const params = await props.params;
+	const searchParams = await props.searchParams;
 	const videoId = params.videoId as Video.VideoId;
+	const awaitRecording =
+		isValidVideoIdParam(videoId) && hasRecordingStoppedParam(searchParams);
 
-	const referrer = (await headers()).get("x-referrer") || "";
-	const isAllowedReferrer = ALLOWED_REFERRERS.some((domain) =>
+	const headersList = await headers();
+	const referrer =
+		headersList.get("x-referrer") || headersList.get("referer") || "";
+	const requestUserAgent = headersList.get("user-agent") || "";
+	const isAllowedReferrer = SOCIAL_REFERRER_DOMAINS.some((domain) =>
 		referrer.includes(domain),
 	);
+	const canRenderSocialPreview =
+		isAllowedReferrer || isSocialCrawlerUserAgent(requestUserAgent);
 
 	const oembedUrl = new URL(
 		`/api/oembed?url=${encodeURIComponent(new URL(`/s/${videoId}`, buildEnv.NEXT_PUBLIC_WEB_URL).toString())}`,
@@ -204,63 +270,88 @@ export async function generateMetadata(
 	return Effect.flatMap(Videos, (v) => v.getByIdForViewing(videoId)).pipe(
 		Effect.map(
 			Option.match({
-				onNone: () => notFound(),
-				onSome: ([video]) => ({
-					title: `${video.name} | ${t("meta.titleSuffix")}`,
-					description: t("meta.watchDescription"),
-					alternates: {
-						types: {
-							"application/json+oembed": oembedUrl,
-						},
-					},
-					openGraph: {
-						images: [
-							{
-								url: new URL(
-									`/api/video/og?videoId=${videoId}`,
-									buildEnv.NEXT_PUBLIC_WEB_URL,
-								).toString(),
-								width: 1200,
-								height: 630,
-							},
-						],
-						videos: [
-							{
-								url: new URL(
-									`/api/playlist?videoId=${video.id}`,
-									buildEnv.NEXT_PUBLIC_WEB_URL,
-								).toString(),
-								width: 1280,
-								height: 720,
-								type: "video/mp4",
-							},
-						],
-					},
-					twitter: {
-						card: "player",
+				onNone: () =>
+					awaitRecording
+						? {
+								title: "Cap: Preparing Video",
+								description: "This recording is being made available.",
+								robots: "noindex, nofollow",
+							}
+						: notFound(),
+				onSome: ([video]) => {
+					const previewImageUrl = new URL(
+						`/api/video/preview?videoId=${videoId}&fallback=og`,
+						buildEnv.NEXT_PUBLIC_WEB_URL,
+					).toString();
+					const ogImageUrl = new URL(
+						`/api/video/og?videoId=${videoId}`,
+						buildEnv.NEXT_PUBLIC_WEB_URL,
+					).toString();
+					const playlistUrl = new URL(
+						`/api/playlist?videoId=${video.id}`,
+						buildEnv.NEXT_PUBLIC_WEB_URL,
+					).toString();
+
+					return {
 						title: `${video.name} | ${t("meta.titleSuffix")}`,
 						description: t("meta.watchDescription"),
-						images: [
-							new URL(
-								`/api/video/og?videoId=${videoId}`,
-								buildEnv.NEXT_PUBLIC_WEB_URL,
-							).toString(),
-						],
-						players: {
-							playerUrl: new URL(
-								`/s/${videoId}`,
-								buildEnv.NEXT_PUBLIC_WEB_URL,
-							).toString(),
-							streamUrl: new URL(
-								`/api/playlist?videoId=${video.id}`,
-								buildEnv.NEXT_PUBLIC_WEB_URL,
-							).toString(),
-							width: 1280,
-							height: 720,
+						alternates: {
+							types: {
+								"application/json+oembed": oembedUrl,
+							},
 						},
-					},
-					robots: isAllowedReferrer ? "index, follow" : "noindex, nofollow",
-				}),
+						openGraph: {
+							images: [
+								{
+									url: previewImageUrl,
+									width: 480,
+									height: 270,
+									type: "image/gif",
+								},
+								{
+									url: ogImageUrl,
+									width: 1200,
+									height: 630,
+								},
+							],
+							videos: [
+								{
+									url: playlistUrl,
+									width: 1280,
+									height: 720,
+									type: "video/mp4",
+								},
+							],
+						},
+						twitter: {
+							card: "player",
+							title: `${video.name} | ${t("meta.titleSuffix")}`,
+							description: t("meta.watchDescription"),
+							images: [
+								{
+									url: previewImageUrl,
+									width: 480,
+									height: 270,
+									type: "image/gif",
+								},
+								{
+									url: ogImageUrl,
+									width: 1200,
+									height: 630,
+								},
+							],
+							players: {
+								playerUrl: getSharePlayerUrl(videoId),
+								streamUrl: playlistUrl,
+								width: 1280,
+								height: 720,
+							},
+						},
+						robots: canRenderSocialPreview
+							? "index, follow"
+							: "noindex, nofollow",
+					};
+				},
 			}),
 		),
 		Effect.catchTags({
@@ -337,6 +428,10 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 	const params = await props.params;
 	const searchParams = await props.searchParams;
 	const videoId = params.videoId as Video.VideoId;
+	const awaitRecording =
+		isValidVideoIdParam(videoId) && hasRecordingStoppedParam(searchParams);
+
+	await reconcileStaleEditUpload(videoId);
 
 	return Effect.gen(function* () {
 		const videosPolicy = yield* VideosPolicy;
@@ -351,6 +446,7 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 					updatedAt: videos.updatedAt,
 					effectiveCreatedAt: videos.effectiveCreatedAt,
 					bucket: videos.bucket,
+					storageIntegrationId: videos.storageIntegrationId,
 					metadata: videos.metadata,
 					public: videos.public,
 					videoStartTime: videos.videoStartTime,
@@ -375,9 +471,14 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 						organizationId: sharedVideos.organizationId,
 					},
 					orgSettings: organizations.settings,
-					hasActiveUpload: sql`${videoUploads.videoId} IS NOT NULL`.mapWith(
-						Boolean,
-					),
+					organizationName: organizations.name,
+					organizationIconUrl: organizations.iconUrl,
+					shareableLinkIconUrl: organizations.shareableLinkIconUrl,
+					hasActiveUpload:
+						sql`${videoUploads.videoId} IS NOT NULL AND ${videos.isScreenshot} = false`.mapWith(
+							Boolean,
+						),
+					activeUploadRawFileKey: videoUploads.rawFileKey,
 					owner: users,
 				})
 				.from(videos)
@@ -406,7 +507,7 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 				)}
 			</div>
 		)),
-		Effect.catchTags(getShareVideoPageCatchers(videoId)),
+		Effect.catchTags(getShareVideoPageCatchers(videoId, awaitRecording)),
 		provideOptionalAuth,
 		EffectRuntime.runPromise,
 	);
@@ -424,16 +525,49 @@ async function AuthorizedContent({
 		sharedOrganization: { organizationId: Organisation.OrganisationId } | null;
 		hasPassword: boolean;
 		hasActiveUpload: boolean;
+		activeUploadRawFileKey: string | null;
 		orgSettings?: OrganizationSettings | null;
 		videoSettings?: OrganizationSettings | null;
+		organizationName?: string | null;
+		organizationIconUrl?: ImageUpload.ImageUrlOrKey | null;
+		shareableLinkIconUrl?: ImageUpload.ImageUrlOrKey | null;
 	};
-	searchParams: { [key: string]: string | string[] | undefined };
+	searchParams: ShareVideoSearchParams;
 }) {
 	// will have already been fetched if auth is required
 	const user = await getCurrentUser();
 	const videoId = video.id;
+	let recoveredDesktopSegmentsUpload = false;
 
-	if (user && video && user.id !== video.owner.id) {
+	if (
+		user?.id === video.owner.id &&
+		!video.isScreenshot &&
+		video.source?.type === "desktopSegments" &&
+		!video.hasActiveUpload &&
+		serverEnv().MEDIA_SERVER_URL
+	) {
+		try {
+			const result = await completeDesktopSegmentsManifestAndQueue({
+				videoId,
+				userId: user.id,
+			});
+			recoveredDesktopSegmentsUpload =
+				result.status === "queued" || result.status === "already-processing";
+		} catch (error) {
+			console.error(
+				`[ShareVideoPage] Failed to recover desktop segments upload ${videoId}:`,
+				error,
+			);
+		}
+	}
+
+	const hasActiveUpload =
+		video.hasActiveUpload || recoveredDesktopSegmentsUpload;
+	const canRegisterView =
+		!hasActiveUpload &&
+		Date.now() - video.updatedAt.getTime() >= VIEW_NOTIFICATION_DELAY_MS;
+
+	if (user && video && user.id !== video.owner.id && canRegisterView) {
 		try {
 			await createNotification({
 				type: "view",
@@ -452,6 +586,7 @@ async function AuthorizedContent({
 	const replyId = optionFromTOrFirst(searchParams.reply).pipe(
 		Option.map(Comment.CommentId.make),
 	);
+	const recordingStopped = hasRecordingStoppedParam(searchParams);
 
 	// Fetch spaces data for the sharing dialog
 	let spacesData = null;
@@ -467,6 +602,17 @@ async function AuthorizedContent({
 
 	// Fetch shared spaces data for this video
 	const sharedSpaces = await getSharedSpacesForVideo(videoId);
+	const rules = resolveEffectiveVideoRules({
+		videoSettings: video.videoSettings,
+		organizationSettings: video.orgSettings,
+		spaces: sharedSpaces.filter((space) => space.id !== space.organizationId),
+	});
+	const env = serverEnv();
+	const transcriptionGenerationAvailable =
+		!video.isScreenshot &&
+		Boolean(env.DEEPGRAM_API_KEY) &&
+		!rules.settings.disableTranscript;
+	const aiProviderAvailable = Boolean(env.GROQ_API_KEY || env.OPENAI_API_KEY);
 
 	let aiGenerationEnabled = false;
 	const videoOwnerQuery = await db()
@@ -485,11 +631,13 @@ async function AuthorizedContent({
 	}
 
 	if (
-		!video.hasActiveUpload &&
+		transcriptionGenerationAvailable &&
+		!hasActiveUpload &&
 		video.transcriptionStatus !== "COMPLETE" &&
 		video.transcriptionStatus !== "PROCESSING" &&
 		video.transcriptionStatus !== "SKIPPED" &&
-		video.transcriptionStatus !== "NO_AUDIO"
+		video.transcriptionStatus !== "NO_AUDIO" &&
+		video.transcriptionStatus !== "ERROR"
 	) {
 		console.log("[ShareVideoPage] Starting transcription for video:", videoId);
 		transcribeVideo(videoId, video.owner.id, aiGenerationEnabled).catch(
@@ -512,6 +660,12 @@ async function AuthorizedContent({
 		chapters: metadata.chapters || null,
 		aiGenerationStatus,
 	};
+
+	const screenshotImageUrl = video.isScreenshot
+		? await Effect.flatMap(Videos, (videos) =>
+				videos.getThumbnailURL(videoId),
+			).pipe(Effect.map(Option.getOrNull), runPromise)
+		: null;
 
 	const customDomainPromise = (async () => {
 		if (!user) {
@@ -670,11 +824,47 @@ async function AuthorizedContent({
 		customDomainPromise,
 	]);
 
+	const canManageSharePageBranding = await (async () => {
+		if (!userId) return false;
+
+		const [organizationAccess] = await db()
+			.select({
+				ownerId: organizations.ownerId,
+				memberRole: organizationMembers.role,
+			})
+			.from(organizations)
+			.leftJoin(
+				organizationMembers,
+				and(
+					eq(organizationMembers.organizationId, organizations.id),
+					eq(organizationMembers.userId, userId),
+				),
+			)
+			.where(
+				and(
+					eq(organizations.id, video.orgId),
+					isNull(organizations.tombstoneAt),
+				),
+			)
+			.limit(1);
+
+		if (!organizationAccess) return false;
+
+		return canManageOrganizationSettings(
+			getEffectiveOrganizationRole({
+				userId,
+				ownerId: organizationAccess.ownerId,
+				memberRole: organizationAccess.memberRole,
+			}),
+		);
+	})();
+
 	const videoWithOrganizationInfo = await Effect.gen(function* () {
 		const imageUploads = yield* ImageUploads;
 
 		return {
 			...video,
+			hasActiveUpload,
 			owner: {
 				id: video.owner.id,
 				name: video.owner.name,
@@ -691,15 +881,64 @@ async function AuthorizedContent({
 			password: null,
 			folderId: null,
 			orgSettings: video.orgSettings || null,
-			settings: video.videoSettings || null,
+			organizationName: video.organizationName,
+			organizationIconUrl: video.organizationIconUrl
+				? yield* imageUploads.resolveImageUrl(video.organizationIconUrl)
+				: null,
+			shareableLinkIconUrl: video.shareableLinkIconUrl
+				? yield* imageUploads.resolveImageUrl(video.shareableLinkIconUrl)
+				: null,
+			settings: rules.settings,
+			hasInheritedPassword: rules.hasInheritedPassword,
+			inheritedPasswordSources: rules.inheritedPasswordSources,
+			inheritedSpaceSettings: rules.inheritedSettings,
 		};
 	}).pipe(runPromise);
+	const isEditProcessing =
+		isEditSourceKey({
+			ownerId: video.owner.id,
+			videoId,
+			rawFileKey: video.activeUploadRawFileKey,
+		}) && !video.isScreenshot;
+
+	const defaultPlaybackSpeed = resolveDefaultPlaybackSpeed(
+		video.videoSettings?.defaultPlaybackSpeed,
+		video.orgSettings?.defaultPlaybackSpeed,
+	);
+
+	const isVideoDownloadReady =
+		!hasActiveUpload && video.source?.type !== "desktopSegments";
+
+	const canDownloadVideo =
+		userId && isVideoDownloadReady
+			? await canUserDownloadVideo({
+					userId,
+					ownerId: video.owner.id,
+					videoId,
+					orgId: video.orgId,
+				})
+			: false;
+
+	let videoHasEdits = false;
+	if (canDownloadVideo && !video.isScreenshot) {
+		const [videoEditRow] = await db()
+			.select({ editSpec: videoEdits.editSpec })
+			.from(videoEdits)
+			.where(eq(videoEdits.videoId, videoId));
+
+		videoHasEdits = videoEditRow
+			? !areEditSpecsEquivalent(
+					videoEditRow.editSpec,
+					createIdentityEditSpec(videoEditRow.editSpec.sourceDuration),
+				)
+			: false;
+	}
 
 	const uiLang = process.env.NEXT_PUBLIC_UI_LANGUAGE || "en";
 
 	return (
 		<>
-			<div className="container flex-1 px-4 mx-auto" data-ui-lang={uiLang}>
+			<div className="container flex-1 px-4 pb-8 mx-auto" data-ui-lang={uiLang}>
 				<ShareHeader
 					data={{
 						...videoWithOrganizationInfo,
@@ -715,10 +954,15 @@ async function AuthorizedContent({
 					sharedSpaces={sharedSpaces}
 					userOrganizations={userOrganizations}
 					spacesData={spacesData}
+					branding={getSharePageBranding(videoWithOrganizationInfo)}
+					canManageSharePageBranding={canManageSharePageBranding}
+					canDownload={canDownloadVideo}
+					hasEdits={videoHasEdits}
 				/>
 
 				<Share
 					data={videoWithOrganizationInfo}
+					screenshotImageUrl={screenshotImageUrl}
 					videoSettings={videoWithOrganizationInfo.settings}
 					comments={commentsPromise}
 					views={viewsPromise}
@@ -726,8 +970,12 @@ async function AuthorizedContent({
 					domainVerified={domainVerified}
 					userOrganizations={userOrganizations}
 					viewerId={user?.id ?? null}
+					isEditProcessing={isEditProcessing}
+					recordingStopped={recordingStopped}
+					defaultPlaybackSpeed={defaultPlaybackSpeed}
 					initialAiData={initialAiData}
-					aiGenerationEnabled={aiGenerationEnabled}
+					aiGenerationAvailable={aiGenerationEnabled && aiProviderAvailable}
+					transcriptionGenerationAvailable={transcriptionGenerationAvailable}
 				/>
 			</div>
 			<div className="py-4 mt-auto">

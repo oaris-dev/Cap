@@ -2,8 +2,15 @@ import { Button } from "@cap/ui-solid";
 import { useNavigate } from "@solidjs/router";
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { check } from "@tauri-apps/plugin-updater";
-import { createResource, createSignal, Match, Show, Switch } from "solid-js";
+import {
+	createResource,
+	createSignal,
+	Match,
+	onCleanup,
+	Show,
+	Switch,
+} from "solid-js";
+import { commands, events } from "~/utils/tauri";
 
 export default function () {
 	const navigate = useNavigate();
@@ -11,7 +18,7 @@ export default function () {
 
 	const [update] = createResource(async () => {
 		try {
-			const update = await check();
+			const update = await commands.updatesCheck();
 			if (!update) return;
 			return update;
 		} catch (e) {
@@ -22,15 +29,15 @@ export default function () {
 	});
 
 	return (
-		<div class="flex flex-col justify-center flex-1 items-center gap-[3rem] p-[1rem] text-[0.875rem] font-[400] h-full">
+		<div class="flex flex-col justify-center flex-1 items-center gap-12 p-4 text-[0.875rem] font-normal h-full">
 			<Show when={updateError()}>
 				<div class="flex flex-col gap-4 items-center text-center max-w-md">
-					<p class="text-[--text-primary]">{updateError()}</p>
-					<p class="text-[--text-tertiary]">
+					<p class="text-(--text-primary)">{updateError()}</p>
+					<p class="text-(--text-tertiary)">
 						Please download the latest version manually from cap.so/download.
 						Your data will not be lost.
 					</p>
-					<p class="text-[--text-tertiary] text-xs">
+					<p class="text-(--text-tertiary) text-xs">
 						If this issue persists, please contact support.
 					</p>
 					<Button onClick={() => navigate("/")}>Go Back</Button>
@@ -40,67 +47,53 @@ export default function () {
 				when={!updateError() && update()}
 				fallback={
 					!updateError() && (
-						<span class="text-[--text-tertiary]">No update available</span>
+						<span class="text-(--text-tertiary)">No update available</span>
 					)
 				}
 				keyed
 			>
-				{(update) => {
+				{(_update) => {
 					type UpdateStatus =
 						| { type: "downloading"; progress: number; contentLength?: number }
 						| { type: "done" };
 
-					const [updateStatus, updateStatusActions] =
-						createResource<UpdateStatus>(
-							() =>
-								new Promise<UpdateStatus>((resolve) => {
-									update
-										.downloadAndInstall((e) => {
-											if (e.event === "Started") {
-												resolve({
-													type: "downloading",
-													progress: 0,
-													contentLength: e.data.contentLength,
-												});
-											} else if (e.event === "Progress") {
-												const status = updateStatus();
-												if (
-													!status ||
-													status.type !== "downloading" ||
-													status.contentLength === undefined
-												)
-													return;
-												updateStatusActions.mutate({
-													...status,
-													progress: e.data.chunkLength + status.progress,
-												});
-											}
-										})
-										.then(async () => {
-											updateStatusActions.mutate({ type: "done" });
-											getCurrentWindow().requestUserAttention(
-												UserAttentionType.Informational,
-											);
-										})
-										.catch((e) => {
-											console.error("Failed to download/install update:", e);
-											setUpdateError(
-												"Failed to download or install the update.",
-											);
-										});
-								}),
-						);
+					const [updateStatus, setUpdateStatus] = createSignal<UpdateStatus>();
+
+					const unlisten = events.updateDownloadProgress.listen((e) => {
+						if (updateStatus()?.type === "done") return;
+						setUpdateStatus({
+							type: "downloading",
+							progress: e.payload.downloaded,
+							contentLength: e.payload.total ?? undefined,
+						});
+					});
+					onCleanup(() => {
+						unlisten.then((cleanup) => cleanup());
+					});
+
+					commands
+						.updatesDownloadAndInstall()
+						.then(() => {
+							setUpdateStatus({ type: "done" });
+							getCurrentWindow().requestUserAttention(
+								UserAttentionType.Informational,
+							);
+						})
+						.catch((e) => {
+							console.error("Failed to download/install update:", e);
+							setUpdateError("Failed to download or install the update.");
+						});
 
 					return (
 						<div>
 							<Switch
 								fallback={
-									<IconCapLogo class="animate-spin size-4 text-[--text-primary]" />
+									<IconCapLogo class="animate-spin size-4 text-(--text-primary)" />
 								}
 							>
 								<Match when={updateStatus()?.type === "done"}>
 									<div class="flex flex-col gap-4 items-center">
-										<p class="text-[--text-tertiary]">
+										<p class="text-(--text-tertiary)">
 											Update has been installed. Restart Cap to finish updating.
 										</p>
 										<Button onClick={() => relaunch()}>Restart Now</Button>
@@ -119,7 +112,7 @@ export default function () {
 								>
 									{(status) => (
 										<>
-											<h1 class="text-[--text-primary] mb-4">
+											<h1 class="text-(--text-primary) mb-4">
 												Installing Update
 											</h1>
 

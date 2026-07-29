@@ -9,7 +9,11 @@ import {
 } from "@cap/database/schema";
 import { and, eq } from "drizzle-orm";
 import { type NextRequest, NextResponse } from "next/server";
-import { calculateProSeats } from "@/utils/organization";
+import { normalizeAssignableOrganizationRole } from "@/lib/permissions/roles";
+import {
+	calculateProSeats,
+	hasActiveDirectSubscription,
+} from "@/utils/organization";
 
 export async function POST(request: NextRequest) {
 	const user = await getCurrentUser();
@@ -62,11 +66,13 @@ export async function POST(request: NextRequest) {
 
 			if (!existingMembership) {
 				const newId = nanoId();
+				const role =
+					normalizeAssignableOrganizationRole(invite.role) ?? "member";
 				await tx.insert(organizationMembers).values({
 					id: newId,
 					organizationId: invite.organizationId,
 					userId: user.id,
-					role: invite.role,
+					role,
 				});
 				memberId = newId;
 			}
@@ -80,17 +86,20 @@ export async function POST(request: NextRequest) {
 			if (org && memberId && !existingMembership) {
 				const [owner] = await tx
 					.select({
+						id: users.id,
 						inviteQuota: users.inviteQuota,
 						stripeSubscriptionId: users.stripeSubscriptionId,
+						stripeSubscriptionStatus: users.stripeSubscriptionStatus,
 					})
 					.from(users)
 					.where(eq(users.id, org.ownerId))
 					.limit(1);
 
-				if (owner?.stripeSubscriptionId) {
+				if (owner?.stripeSubscriptionId && hasActiveDirectSubscription(owner)) {
 					const allMembers = await tx
 						.select({
 							id: organizationMembers.id,
+							userId: organizationMembers.userId,
 							hasProSeat: organizationMembers.hasProSeat,
 						})
 						.from(organizationMembers)
@@ -101,6 +110,8 @@ export async function POST(request: NextRequest) {
 
 					const { proSeatsRemaining } = calculateProSeats({
 						inviteQuota: owner.inviteQuota ?? 1,
+						ownerId: org.ownerId,
+						ownerIsPro: true,
 						members: allMembers,
 					});
 

@@ -11,6 +11,13 @@ type ProbeResult = {
 	response: Response;
 };
 
+type ProbeFailure = {
+	url: string;
+	reason: "network-error" | "unavailable";
+};
+
+type ProbeOutcome = ProbeFailure | ProbeResult;
+
 type ResolvePlaybackSourceInput = {
 	videoSrc: string;
 	rawFallbackSrc?: string;
@@ -31,6 +38,14 @@ function isPlayableProbeResponse(response: Response): boolean {
 	return response.ok || response.status === 206;
 }
 
+function isProbeResult(outcome: ProbeOutcome): outcome is ProbeResult {
+	return "response" in outcome;
+}
+
+function canUseUnprobedSource(url: string): boolean {
+	return url.startsWith("/") && !url.startsWith("//");
+}
+
 function isWebMContentType(contentType: string, url: string): boolean {
 	return (
 		contentType.toLowerCase().includes("video/webm") ||
@@ -42,7 +57,7 @@ async function probePlaybackSource(
 	url: string,
 	fetchImpl: typeof fetch,
 	now: () => number,
-): Promise<ProbeResult | null> {
+): Promise<ProbeOutcome> {
 	const requestUrl = appendCacheBust(url, now());
 
 	try {
@@ -51,7 +66,10 @@ async function probePlaybackSource(
 		});
 
 		if (!isPlayableProbeResponse(response)) {
-			return null;
+			return {
+				url: requestUrl,
+				reason: "unavailable",
+			};
 		}
 
 		return {
@@ -59,11 +77,18 @@ async function probePlaybackSource(
 			response,
 		};
 	} catch {
-		return null;
+		return {
+			url: requestUrl,
+			reason: "network-error",
+		};
 	}
 }
 
-export function detectCrossOriginSupport(url: string): boolean {
+export function detectCrossOriginSupport(
+	url: string,
+	probeWasRedirected = false,
+): boolean {
+	if (probeWasRedirected) return true;
 	try {
 		const hostname = new URL(url, "https://cap.so").hostname;
 		const isR2OrS3 =
@@ -119,7 +144,7 @@ export async function resolvePlaybackSource({
 
 		const rawResult = await probePlaybackSource(rawFallbackSrc, fetchImpl, now);
 
-		if (!rawResult) {
+		if (!isProbeResult(rawResult)) {
 			return null;
 		}
 
@@ -135,7 +160,8 @@ export async function resolvePlaybackSource({
 			url: rawResult.url,
 			type: "raw",
 			supportsCrossOrigin:
-				enableCrossOrigin && detectCrossOriginSupport(rawResult.url),
+				enableCrossOrigin &&
+				detectCrossOriginSupport(rawResult.url, rawResult.response.redirected),
 		};
 	};
 
@@ -145,12 +171,21 @@ export async function resolvePlaybackSource({
 
 	const mp4Result = await probePlaybackSource(videoSrc, fetchImpl, now);
 
-	if (mp4Result) {
+	if (isProbeResult(mp4Result)) {
 		return {
 			url: mp4Result.url,
 			type: "mp4",
 			supportsCrossOrigin:
-				enableCrossOrigin && detectCrossOriginSupport(mp4Result.url),
+				enableCrossOrigin &&
+				detectCrossOriginSupport(mp4Result.url, mp4Result.response.redirected),
+		};
+	}
+
+	if (mp4Result.reason === "network-error" && canUseUnprobedSource(videoSrc)) {
+		return {
+			url: mp4Result.url,
+			type: "mp4",
+			supportsCrossOrigin: false,
 		};
 	}
 

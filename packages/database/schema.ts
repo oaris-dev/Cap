@@ -1,10 +1,14 @@
 import type {
+	Agent,
+	AiGenerationLanguage,
 	Comment,
 	Folder,
 	ImageUpload,
 	Organisation,
+	PublicCollection,
 	S3Bucket,
 	Space,
+	Storage,
 	User,
 	Video,
 } from "@cap/web-domain";
@@ -30,7 +34,17 @@ import {
 import { relations } from "drizzle-orm/relations";
 
 import { nanoIdLength } from "./helpers.ts";
-import type { VideoMetadata } from "./types/index.ts";
+import type { VideoEditSpec, VideoMetadata } from "./types/index.ts";
+
+export type AuthApiKeySource = "desktop" | "extension" | "mobile" | "unknown";
+
+type GoogleDriveStorageQuotaCache = {
+	limit?: string | null;
+	usage?: string | null;
+	usageInDrive?: string | null;
+	usageInDriveTrash?: string | null;
+	fetchedAt: string;
+};
 
 const nanoId = customType<{ data: string; notNull: true }>({
 	dataType() {
@@ -113,6 +127,7 @@ export const users = mysqlTable(
 		inviteQuota: int("inviteQuota").notNull().default(1),
 		defaultOrgId:
 			nanoIdNullable("defaultOrgId").$type<Organisation.OrganisationId>(),
+		authSessionVersion: int("authSessionVersion").notNull().default(0),
 	},
 	(table) => ({
 		emailIndex: uniqueIndex("email_idx").on(table.email),
@@ -191,8 +206,15 @@ export const organizations = mysqlTable(
 			disableReactions?: boolean;
 			disableTranscript?: boolean;
 			disableComments?: boolean;
+			hideShareableLinkCapLogo?: boolean;
+			shareableLinkUseOrganizationIcon?: boolean;
+			aiGenerationLanguage?: AiGenerationLanguage;
+			defaultPlaybackSpeed?: number;
 		}>(),
 		iconUrl: varchar("iconUrl", {
+			length: 1024,
+		}).$type<ImageUpload.ImageUrlOrKey>(),
+		shareableLinkIconUrl: varchar("shareableLinkIconUrl", {
 			length: 1024,
 		}).$type<ImageUpload.ImageUrlOrKey>(),
 		createdAt: timestamp("createdAt").notNull().defaultNow(),
@@ -209,7 +231,7 @@ export const organizations = mysqlTable(
 	}),
 );
 
-export type OrganisationMemberRole = "owner" | "member";
+export type OrganisationMemberRole = "owner" | "admin" | "member";
 export const organizationMembers = mysqlTable(
 	"organization_members",
 	{
@@ -272,6 +294,11 @@ export const folders = mysqlTable(
 		})
 			.notNull()
 			.default("normal"),
+		// Internet-facing public collection link (/c/[id]).
+		public: boolean("public").notNull().default(false),
+		settings: json("settings").$type<{
+			publicPage?: PublicCollection.PublicPageSettings;
+		}>(),
 		organizationId: nanoId("organizationId")
 			.notNull()
 			.$type<Organisation.OrganisationId>(),
@@ -286,6 +313,15 @@ export const folders = mysqlTable(
 		createdByIdIndex: index("created_by_id_idx").on(table.createdById),
 		parentIdIndex: index("parent_id_idx").on(table.parentId),
 		spaceIdIndex: index("space_id_idx").on(table.spaceId),
+		publicParentIdIndex: index("public_parent_id_idx").on(
+			table.public,
+			table.parentId,
+		),
+		publicSpaceParentIdIndex: index("public_space_parent_id_idx").on(
+			table.public,
+			table.spaceId,
+			table.parentId,
+		),
 	}),
 );
 
@@ -297,6 +333,9 @@ export const videos = mysqlTable(
 		orgId: nanoIdRequired("orgId").$type<Organisation.OrganisationId>(),
 		name: varchar("name", { length: 255 }).notNull().default("My Video"),
 		bucket: nanoIdNullable("bucket").$type<S3Bucket.S3BucketId>(),
+		storageIntegrationId: nanoIdNullable("storageIntegrationId")
+			.references(() => storageIntegrations.id, { onDelete: "restrict" })
+			.$type<Storage.StorageIntegrationId>(),
 		// in seconds
 		duration: float("duration"),
 		width: int("width"),
@@ -311,6 +350,7 @@ export const videos = mysqlTable(
 			disableReactions?: boolean;
 			disableTranscript?: boolean;
 			disableComments?: boolean;
+			defaultPlaybackSpeed?: number;
 		}>(),
 		transcriptionStatus: varchar("transcriptionStatus", { length: 255 }).$type<
 			"PROCESSING" | "COMPLETE" | "ERROR" | "SKIPPED" | "NO_AUDIO"
@@ -320,6 +360,7 @@ export const videos = mysqlTable(
 				| { type: "MediaConvert" }
 				| { type: "local" }
 				| { type: "desktopMP4" }
+				| { type: "desktopSegments" }
 				| { type: "webMP4" }
 			>()
 			.notNull()
@@ -352,6 +393,7 @@ export const videos = mysqlTable(
 		index("owner_id_idx").on(table.ownerId),
 		index("is_public_idx").on(table.public),
 		index("folder_id_idx").on(table.folderId),
+		index("storage_integration_id_idx").on(table.storageIntegrationId),
 		index("org_owner_folder_idx").on(
 			table.orgId,
 			table.ownerId,
@@ -363,6 +405,18 @@ export const videos = mysqlTable(
 		),
 	],
 );
+
+export const videoEdits = mysqlTable("video_edits", {
+	videoId: nanoId("videoId")
+		.notNull()
+		.primaryKey()
+		.$type<Video.VideoId>()
+		.references(() => videos.id, { onDelete: "cascade" }),
+	sourceKey: varchar("sourceKey", { length: 512 }).notNull(),
+	editSpec: json("editSpec").notNull().$type<VideoEditSpec>(),
+	createdAt: timestamp("createdAt").notNull().defaultNow(),
+	updatedAt: timestamp("updatedAt").notNull().defaultNow().onUpdateNow(),
+});
 
 export const sharedVideos = mysqlTable(
 	"shared_videos",
@@ -550,17 +604,155 @@ export const messengerMessages = mysqlTable(
 	}),
 );
 
-export const s3Buckets = mysqlTable("s3_buckets", {
-	id: nanoId("id").notNull().primaryKey().$type<S3Bucket.S3BucketId>(),
-	ownerId: nanoId("ownerId").notNull().$type<User.UserId>(),
-	// Use encryptedText for sensitive fields
-	region: encryptedText("region").notNull(),
-	endpoint: encryptedTextNullable("endpoint"),
-	bucketName: encryptedText("bucketName").notNull(),
-	accessKeyId: encryptedText("accessKeyId").notNull(),
-	secretAccessKey: encryptedText("secretAccessKey").notNull(),
-	provider: text("provider").notNull().default("aws"),
-});
+export const messengerSupportEmails = mysqlTable(
+	"messenger_support_emails",
+	{
+		id: nanoId("id").notNull().primaryKey(),
+		conversationId: nanoId("conversationId").notNull(),
+		userId: nanoId("userId").notNull().$type<User.UserId>(),
+		userEmail: varchar("userEmail", { length: 255 }).notNull(),
+		subject: varchar("subject", { length: 255 }).notNull(),
+		message: text("message").notNull(),
+		createdAt: timestamp("createdAt").notNull().defaultNow(),
+	},
+	(table) => ({
+		conversationForeignKey: foreignKey({
+			name: "support_email_conversation_fk",
+			columns: [table.conversationId],
+			foreignColumns: [messengerConversations.id],
+		}).onDelete("cascade"),
+		userCreatedAtIndex: index("support_email_user_created_at_idx").on(
+			table.userId,
+			table.createdAt,
+		),
+		conversationCreatedAtIndex: index(
+			"support_email_conversation_created_at_idx",
+		).on(table.conversationId, table.createdAt),
+	}),
+);
+
+export const s3Buckets = mysqlTable(
+	"s3_buckets",
+	{
+		id: nanoId("id").notNull().primaryKey().$type<S3Bucket.S3BucketId>(),
+		ownerId: nanoId("ownerId").notNull().$type<User.UserId>(),
+		organizationId:
+			nanoIdNullable("organizationId").$type<Organisation.OrganisationId>(),
+		region: encryptedText("region").notNull(),
+		endpoint: encryptedTextNullable("endpoint"),
+		bucketName: encryptedText("bucketName").notNull(),
+		accessKeyId: encryptedText("accessKeyId").notNull(),
+		secretAccessKey: encryptedText("secretAccessKey").notNull(),
+		provider: text("provider").notNull().default("aws"),
+		active: boolean("active").notNull().default(true),
+		createdAt: timestamp("createdAt").notNull().defaultNow(),
+		updatedAt: timestamp("updatedAt").notNull().defaultNow().onUpdateNow(),
+	},
+	(table) => ({
+		ownerOrganizationIndex: index("owner_organization_idx").on(
+			table.ownerId,
+			table.organizationId,
+		),
+		organizationIdIndex: index("organization_id_idx").on(table.organizationId),
+		organizationActiveIndex: index("organization_active_idx").on(
+			table.organizationId,
+			table.active,
+			table.updatedAt,
+		),
+	}),
+);
+
+export const storageIntegrations = mysqlTable(
+	"storage_integrations",
+	{
+		id: nanoId("id")
+			.notNull()
+			.primaryKey()
+			.$type<Storage.StorageIntegrationId>(),
+		ownerId: nanoId("ownerId").notNull().$type<User.UserId>(),
+		organizationId:
+			nanoIdNullable("organizationId").$type<Organisation.OrganisationId>(),
+		provider: varchar("provider", { length: 64 })
+			.notNull()
+			.$type<Storage.StorageProvider>(),
+		displayName: varchar("displayName", { length: 255 }).notNull(),
+		status: varchar("status", { length: 32 })
+			.notNull()
+			.default("active")
+			.$type<Storage.StorageIntegrationStatus>(),
+		active: boolean("active").notNull().default(false),
+		encryptedConfig: encryptedText("encryptedConfig").notNull(),
+		googleDriveAccessToken: encryptedTextNullable("googleDriveAccessToken"),
+		googleDriveAccessTokenExpiresAt: timestamp(
+			"googleDriveAccessTokenExpiresAt",
+		),
+		googleDriveTokenRefreshLeaseId: varchar("googleDriveTokenRefreshLeaseId", {
+			length: 64,
+		}),
+		googleDriveTokenRefreshLeaseExpiresAt: timestamp(
+			"googleDriveTokenRefreshLeaseExpiresAt",
+		),
+		googleDriveStorageQuotaCache: json(
+			"googleDriveStorageQuotaCache",
+		).$type<GoogleDriveStorageQuotaCache>(),
+		createdAt: timestamp("createdAt").notNull().defaultNow(),
+		updatedAt: timestamp("updatedAt").notNull().defaultNow().onUpdateNow(),
+	},
+	(table) => ({
+		ownerProviderIndex: index("owner_provider_idx").on(
+			table.ownerId,
+			table.provider,
+		),
+		ownerActiveIndex: index("owner_active_idx").on(table.ownerId, table.active),
+		organizationProviderIndex: index("organization_provider_idx").on(
+			table.organizationId,
+			table.provider,
+		),
+		organizationActiveIndex: index("organization_active_idx").on(
+			table.organizationId,
+			table.active,
+			table.status,
+		),
+	}),
+);
+
+export const storageObjects = mysqlTable(
+	"storage_objects",
+	{
+		id: nanoId("id").notNull().primaryKey().$type<Storage.StorageObjectId>(),
+		integrationId: nanoId("integrationId")
+			.notNull()
+			.references(() => storageIntegrations.id, { onDelete: "restrict" })
+			.$type<Storage.StorageIntegrationId>(),
+		ownerId: nanoId("ownerId").notNull().$type<User.UserId>(),
+		videoId: nanoIdNullable("videoId").$type<Video.VideoId>(),
+		objectKey: text("objectKey").notNull(),
+		objectKeyHash: varchar("objectKeyHash", { length: 64 }).notNull(),
+		providerObjectId: varchar("providerObjectId", { length: 255 }).notNull(),
+		uploadSessionUrl: encryptedTextNullable("uploadSessionUrl"),
+		uploadStatus: varchar("uploadStatus", { length: 32 })
+			.notNull()
+			.default("pending")
+			.$type<"pending" | "complete" | "error">(),
+		contentType: varchar("contentType", { length: 255 }),
+		contentLength: bigint("contentLength", { mode: "number", unsigned: true }),
+		metadata: json("metadata").$type<Storage.StorageObjectMetadata>(),
+		createdAt: timestamp("createdAt").notNull().defaultNow(),
+		updatedAt: timestamp("updatedAt").notNull().defaultNow().onUpdateNow(),
+	},
+	(table) => ({
+		integrationKeyHashIndex: uniqueIndex("integration_key_hash_idx").on(
+			table.integrationId,
+			table.objectKeyHash,
+		),
+		integrationStatusIndex: index("integration_status_idx").on(
+			table.integrationId,
+			table.uploadStatus,
+		),
+		videoIdIndex: index("video_id_idx").on(table.videoId),
+		ownerIdIndex: index("owner_id_idx").on(table.ownerId),
+	}),
+);
 
 export const notificationsRelations = relations(notifications, ({ one }) => ({
 	org: one(organizations, {
@@ -573,11 +765,135 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
 	}),
 }));
 
-export const authApiKeys = mysqlTable("auth_api_keys", {
-	id: varchar("id", { length: 36 }).notNull().primaryKey(),
-	userId: nanoId("userId").notNull().$type<User.UserId>(),
-	createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+export const authApiKeys = mysqlTable(
+	"auth_api_keys",
+	{
+		id: varchar("id", { length: 36 }).notNull().primaryKey(),
+		userId: nanoId("userId").notNull().$type<User.UserId>(),
+		source: varchar("source", { length: 32 })
+			.notNull()
+			.default("unknown")
+			.$type<AuthApiKeySource>(),
+		createdAt: timestamp("createdAt").defaultNow().notNull(),
+	},
+	(table) => ({
+		userIdCreatedAtIndex: index("user_id_created_at_idx").on(
+			table.userId,
+			table.createdAt,
+		),
+	}),
+);
+
+export const agentApiKeys = mysqlTable(
+	"agent_api_keys",
+	{
+		id: nanoId("id").notNull().primaryKey(),
+		userId: nanoId("userId").notNull().$type<User.UserId>(),
+		tokenHash: varchar("tokenHash", { length: 64 }).notNull(),
+		name: varchar("name", { length: 100 }).notNull().default("Cap CLI"),
+		scopes: json("scopes").notNull().$type<Agent.AgentScope[]>(),
+		expiresAt: timestamp("expiresAt").notNull(),
+		revokedAt: timestamp("revokedAt"),
+		createdAt: timestamp("createdAt").notNull().defaultNow(),
+		lastUsedAt: timestamp("lastUsedAt"),
+	},
+	(table) => [
+		uniqueIndex("token_hash_idx").on(table.tokenHash),
+		index("user_created_at_idx").on(table.userId, table.createdAt),
+		index("expires_at_idx").on(table.expiresAt),
+	],
+);
+
+export const agentApiIdempotency = mysqlTable(
+	"agent_api_idempotency",
+	{
+		id: nanoId("id").notNull().primaryKey(),
+		userId: nanoId("userId").notNull().$type<User.UserId>(),
+		operation: varchar("operation", { length: 64 }).notNull(),
+		keyHash: varchar("keyHash", { length: 64 }).notNull(),
+		requestHash: varchar("requestHash", { length: 64 }).notNull(),
+		state: varchar("state", {
+			length: 16,
+			enum: ["pending", "complete"],
+		})
+			.notNull()
+			.default("pending"),
+		statusCode: int("statusCode"),
+		response: json("response").$type<unknown>(),
+		expiresAt: timestamp("expiresAt").notNull(),
+		createdAt: timestamp("createdAt").notNull().defaultNow(),
+		updatedAt: timestamp("updatedAt").notNull().defaultNow().onUpdateNow(),
+	},
+	(table) => [
+		uniqueIndex("user_operation_key_idx").on(
+			table.userId,
+			table.operation,
+			table.keyHash,
+		),
+		index("expires_at_idx").on(table.expiresAt),
+	],
+);
+
+export const agentApiAuthorizationCodes = mysqlTable(
+	"agent_api_authorization_codes",
+	{
+		id: nanoId("id").notNull().primaryKey(),
+		userId: nanoId("userId").notNull().$type<User.UserId>(),
+		codeHash: varchar("codeHash", { length: 64 }).notNull(),
+		codeChallenge: varchar("codeChallenge", { length: 64 }).notNull(),
+		redirectUri: varchar("redirectUri", { length: 512 }).notNull(),
+		scopes: json("scopes").notNull().$type<Agent.AgentScope[]>(),
+		expiresAt: timestamp("expiresAt").notNull(),
+		consumedAt: timestamp("consumedAt"),
+		createdAt: timestamp("createdAt").notNull().defaultNow(),
+	},
+	(table) => [
+		uniqueIndex("code_hash_idx").on(table.codeHash),
+		index("expires_at_idx").on(table.expiresAt),
+		index("user_created_at_idx").on(table.userId, table.createdAt),
+	],
+);
+
+export const agentApiOperations = mysqlTable(
+	"agent_api_operations",
+	{
+		id: nanoId("id").notNull().primaryKey(),
+		userId: nanoId("userId").notNull().$type<User.UserId>(),
+		kind: varchar("kind", {
+			length: 32,
+			enum: [
+				"duplicate_cap",
+				"delete_cap",
+				"import_loom",
+				"delete_organization",
+				"set_organization_domain",
+				"remove_organization_domain",
+				"verify_organization_domain",
+				"transfer_org_content",
+			],
+		}).notNull(),
+		resourceId: nanoId("resourceId").notNull(),
+		resultResourceId: nanoIdNullable("resultResourceId"),
+		state: varchar("state", {
+			length: 16,
+			enum: ["queued", "running", "succeeded", "failed"],
+		})
+			.notNull()
+			.default("queued"),
+		payload: json("payload").notNull().$type<unknown>(),
+		result: json("result").$type<unknown>(),
+		errorCode: varchar("errorCode", { length: 64 }),
+		errorMessage: text("errorMessage"),
+		createdAt: timestamp("createdAt").notNull().defaultNow(),
+		updatedAt: timestamp("updatedAt").notNull().defaultNow().onUpdateNow(),
+		completedAt: timestamp("completedAt"),
+	},
+	(table) => [
+		index("user_created_at_idx").on(table.userId, table.createdAt),
+		index("state_updated_at_idx").on(table.state, table.updatedAt),
+		index("resource_id_idx").on(table.resourceId),
+	],
+);
 
 export const commentsRelations = relations(comments, ({ one }) => ({
 	author: one(users, {
@@ -602,6 +918,7 @@ export const messengerConversationsRelations = relations(
 			references: [users.id],
 		}),
 		messages: many(messengerMessages),
+		supportEmails: many(messengerSupportEmails),
 	}),
 );
 
@@ -619,6 +936,20 @@ export const messengerMessagesRelations = relations(
 	}),
 );
 
+export const messengerSupportEmailsRelations = relations(
+	messengerSupportEmails,
+	({ one }) => ({
+		conversation: one(messengerConversations, {
+			fields: [messengerSupportEmails.conversationId],
+			references: [messengerConversations.id],
+		}),
+		user: one(users, {
+			fields: [messengerSupportEmails.userId],
+			references: [users.id],
+		}),
+	}),
+);
+
 // Define Relationships
 export const usersRelations = relations(users, ({ many, one }) => ({
 	accounts: many(accounts),
@@ -627,10 +958,12 @@ export const usersRelations = relations(users, ({ many, one }) => ({
 	videos: many(videos),
 	sharedVideos: many(sharedVideos),
 	customBucket: one(s3Buckets),
+	storageIntegrations: many(storageIntegrations),
 	spaces: many(spaces),
 	spaceMembers: many(spaceMembers),
 	messengerConversations: many(messengerConversations),
 	messengerMessages: many(messengerMessages),
+	messengerSupportEmails: many(messengerSupportEmails),
 }));
 
 export const accountsRelations = relations(accounts, ({ one }) => ({
@@ -645,6 +978,36 @@ export const s3BucketsRelations = relations(s3Buckets, ({ one }) => ({
 		fields: [s3Buckets.ownerId],
 		references: [users.id],
 	}),
+	organization: one(organizations, {
+		fields: [s3Buckets.organizationId],
+		references: [organizations.id],
+	}),
+}));
+
+export const storageIntegrationsRelations = relations(
+	storageIntegrations,
+	({ one, many }) => ({
+		owner: one(users, {
+			fields: [storageIntegrations.ownerId],
+			references: [users.id],
+		}),
+		organization: one(organizations, {
+			fields: [storageIntegrations.organizationId],
+			references: [organizations.id],
+		}),
+		objects: many(storageObjects),
+	}),
+);
+
+export const storageObjectsRelations = relations(storageObjects, ({ one }) => ({
+	integration: one(storageIntegrations, {
+		fields: [storageObjects.integrationId],
+		references: [storageIntegrations.id],
+	}),
+	video: one(videos, {
+		fields: [storageObjects.videoId],
+		references: [videos.id],
+	}),
 }));
 
 export const organizationsRelations = relations(
@@ -658,6 +1021,8 @@ export const organizationsRelations = relations(
 		sharedVideos: many(sharedVideos),
 		organizationInvites: many(organizationInvites),
 		spaces: many(spaces),
+		s3Buckets: many(s3Buckets),
+		storageIntegrations: many(storageIntegrations),
 	}),
 );
 
@@ -710,9 +1075,24 @@ export const videosRelations = relations(videos, ({ one, many }) => ({
 	}),
 	sharedVideos: many(sharedVideos),
 	spaceVideos: many(spaceVideos),
+	edit: one(videoEdits, {
+		fields: [videos.id],
+		references: [videoEdits.videoId],
+	}),
 	folder: one(folders, {
 		fields: [videos.folderId],
 		references: [folders.id],
+	}),
+	storageIntegration: one(storageIntegrations, {
+		fields: [videos.storageIntegrationId],
+		references: [storageIntegrations.id],
+	}),
+}));
+
+export const videoEditsRelations = relations(videoEdits, ({ one }) => ({
+	video: one(videos, {
+		fields: [videoEdits.videoId],
+		references: [videos.id],
 	}),
 }));
 
@@ -748,15 +1128,33 @@ export const spaces = mysqlTable(
 			length: 255,
 		}).$type<ImageUpload.ImageUrlOrKey>(),
 		description: varchar("description", { length: 1000 }),
+		settings: json("settings").$type<{
+			disableSummary?: boolean;
+			disableCaptions?: boolean;
+			disableChapters?: boolean;
+			disableReactions?: boolean;
+			disableTranscript?: boolean;
+			disableComments?: boolean;
+			publicPage?: PublicCollection.PublicPageSettings;
+		}>(),
+		password: encryptedTextNullable("password"),
 		createdAt: timestamp("createdAt").notNull().defaultNow(),
 		updatedAt: timestamp("updatedAt").notNull().defaultNow().onUpdateNow(),
+		// Org-internal browsability: "Public" spaces are visible to all org
+		// members. Unrelated to the internet-facing `public` flag below.
 		privacy: varchar("privacy", { length: 255, enum: ["Public", "Private"] })
 			.notNull()
 			.default("Private"),
+		// Internet-facing public collection link (/c/[id]).
+		public: boolean("public").notNull().default(false),
 	},
 	(table) => ({
 		organizationIdIndex: index("organization_id_idx").on(table.organizationId),
 		createdByIdIndex: index("created_by_id_idx").on(table.createdById),
+		publicOrganizationIdIndex: index("public_organization_id_idx").on(
+			table.public,
+			table.organizationId,
+		),
 	}),
 );
 
@@ -769,7 +1167,7 @@ export const spaceMembers = mysqlTable(
 		role: varchar("role", { length: 255 })
 			.notNull()
 			.default("member")
-			.$type<"member" | "Admin">(),
+			.$type<"admin" | "member">(),
 		createdAt: timestamp("createdAt").notNull().defaultNow(),
 		updatedAt: timestamp("updatedAt").notNull().defaultNow().onUpdateNow(),
 	},
@@ -864,28 +1262,42 @@ export const foldersRelations = relations(folders, ({ one, many }) => ({
 	videos: many(videos),
 }));
 
-export const videoUploads = mysqlTable("video_uploads", {
-	videoId: nanoId("video_id").primaryKey().notNull().$type<Video.VideoId>(),
-	uploaded: bigint("uploaded", { mode: "number", unsigned: true })
-		.notNull()
-		.$defaultFn(() => 0),
-	total: bigint("total", { mode: "number", unsigned: true })
-		.notNull()
-		.$defaultFn(() => 0),
-	startedAt: timestamp("started_at").notNull().defaultNow(),
-	updatedAt: timestamp("updated_at").notNull().defaultNow(),
-	mode: varchar("mode", { length: 255, enum: ["singlepart", "multipart"] }),
-	phase: varchar("phase", { length: 32 })
-		.$type<
-			"uploading" | "processing" | "generating_thumbnail" | "complete" | "error"
-		>()
-		.notNull()
-		.default("uploading"),
-	processingProgress: int("processing_progress").notNull().default(0),
-	processingMessage: varchar("processing_message", { length: 255 }),
-	processingError: text("processing_error"),
-	rawFileKey: varchar("raw_file_key", { length: 512 }),
-});
+export const videoUploads = mysqlTable(
+	"video_uploads",
+	{
+		videoId: nanoId("video_id").primaryKey().notNull().$type<Video.VideoId>(),
+		uploaded: bigint("uploaded", { mode: "number", unsigned: true })
+			.notNull()
+			.$defaultFn(() => 0),
+		total: bigint("total", { mode: "number", unsigned: true })
+			.notNull()
+			.$defaultFn(() => 0),
+		startedAt: timestamp("started_at").notNull().defaultNow(),
+		updatedAt: timestamp("updated_at").notNull().defaultNow(),
+		mode: varchar("mode", { length: 255, enum: ["singlepart", "multipart"] }),
+		phase: varchar("phase", { length: 32 })
+			.$type<
+				| "uploading"
+				| "processing"
+				| "generating_thumbnail"
+				| "complete"
+				| "error"
+			>()
+			.notNull()
+			.default("uploading"),
+		processingProgress: int("processing_progress").notNull().default(0),
+		processingMessage: varchar("processing_message", { length: 255 }),
+		processingError: text("processing_error"),
+		rawFileKey: varchar("raw_file_key", { length: 512 }),
+	},
+	(table) => [
+		index("phase_updated_at_video_id_idx").on(
+			table.phase,
+			table.updatedAt,
+			table.videoId,
+		),
+	],
+);
 
 export const importedVideos = mysqlTable(
 	"imported_videos",

@@ -1,5 +1,5 @@
-import { ToggleButton as KToggleButton } from "@kobalte/core/toggle-button";
 import { makePersisted } from "@solid-primitives/storage";
+import { listen } from "@tauri-apps/api/event";
 import {
 	availableMonitors,
 	currentMonitor,
@@ -11,7 +11,6 @@ import { type } from "@tauri-apps/plugin-os";
 import { cx } from "cva";
 import {
 	type Accessor,
-	type ComponentProps,
 	createEffect,
 	createResource,
 	createSignal,
@@ -22,43 +21,74 @@ import {
 	Suspense,
 } from "solid-js";
 import { createStore } from "solid-js/store";
+import {
+	CAMERA_DEFAULT_SIZE,
+	CAMERA_MAX_SIZE,
+	CAMERA_MIN_SIZE,
+	CAMERA_PRESET_LARGE,
+	CAMERA_TOOLBAR_HEIGHT,
+	CAMERA_WINDOW_STATE_STORAGE_KEY,
+	CameraPreviewToolbar,
+	CameraResizeHandles,
+	type CameraWindowState,
+	cameraBorderRadius,
+	cameraPreviewDimensions,
+	cameraToolbarScale,
+	getDefaultCameraWindowState,
+	normalizeBackgroundBlurMode,
+} from "~/components/CameraPreviewChrome";
 import { generalSettingsStore } from "~/store";
 import { createTauriEventListener } from "~/utils/createEventListener";
-import { createCameraMutation } from "~/utils/queries";
-import { createLazySignal } from "~/utils/socket";
+import {
+	createCameraMutation,
+	createCurrentRecordingQuery,
+} from "~/utils/queries";
+import {
+	type CanvasControls,
+	createImageDataWS,
+	type FrameData,
+} from "~/utils/socket";
 import { commands, events } from "~/utils/tauri";
 import { RecordingOptionsProvider } from "./(window-chrome)/OptionsContext";
 
-type CameraWindowShape = "round" | "square" | "full";
-type CameraWindowState = {
-	size: number;
-	shape: CameraWindowShape;
-	mirrored: boolean;
+type CameraPreviewIssue = {
+	title: string;
+	message: string;
 };
 
-const CAMERA_MIN_SIZE = 150;
-const CAMERA_MAX_SIZE = 600;
-const CAMERA_DEFAULT_SIZE = 230;
-const CAMERA_PRESET_SMALL = 230;
-const CAMERA_PRESET_LARGE = 400;
+const CAMERA_PREVIEW_ERROR_EVENT = "camera-preview-error";
+const CAMERA_PREVIEW_CLEAR_EVENT = "camera-preview-clear";
+const CAMERA_DISCONNECTED_ISSUE: CameraPreviewIssue = {
+	title: "Camera disconnected",
+	message: "The selected camera stopped sending video.",
+};
 
 const getCameraOnlyMode = () => {
 	return window.__CAP__?.cameraOnlyMode === true;
 };
 
-const getCameraOnlyInitialState = (): CameraWindowState => ({
-	size: CAMERA_PRESET_LARGE,
-	shape: "full",
-	mirrored: false,
-});
+const getNativeCameraPreviewInitialState = () => {
+	return window.__CAP__?.enableNativeCameraPreview === true;
+};
 
 let ignoreMoveUntil = 0;
+let performanceHarnessCameraOpen = false;
 
 const ignoreMoveFor = (durationMs: number) => {
 	ignoreMoveUntil = Date.now() + durationMs;
 };
 
 const shouldIgnoreMove = () => Date.now() < ignoreMoveUntil;
+
+function createCameraWindowChromeVisibility() {
+	const [visible, setVisible] = createSignal(false);
+
+	return {
+		visible,
+		show: () => setVisible(true),
+		hide: () => setVisible(false),
+	};
+}
 
 const queueCameraPositionSave = (() => {
 	let pending: { x: number; y: number } | null = null;
@@ -98,20 +128,39 @@ export default function () {
 	document.documentElement.classList.toggle("dark", true);
 
 	const generalSettings = generalSettingsStore.createQuery();
-	const isNativePreviewEnabled =
-		(type() !== "windows" && generalSettings.data?.enableNativeCameraPreview) ||
-		false;
+	const isNativePreviewEnabled = () => {
+		if (type() === "windows") return false;
+		if (generalSettings.isPending) return getNativeCameraPreviewInitialState();
+		return (
+			generalSettings.data?.enableNativeCameraPreview ??
+			getNativeCameraPreviewInitialState()
+		);
+	};
 
-	const [cameraDisconnected, setCameraDisconnected] = createSignal(false);
+	const [cameraIssue, setCameraIssue] = createSignal<CameraPreviewIssue | null>(
+		null,
+	);
+
+	const unlistenCameraPreviewError = listen<CameraPreviewIssue>(
+		CAMERA_PREVIEW_ERROR_EVENT,
+		({ payload }) => setCameraIssue(payload),
+	);
+	const unlistenCameraPreviewClear = listen(CAMERA_PREVIEW_CLEAR_EVENT, () =>
+		setCameraIssue(null),
+	);
+	onCleanup(() => {
+		void unlistenCameraPreviewError.then((unlisten) => unlisten());
+		void unlistenCameraPreviewClear.then((unlisten) => unlisten());
+	});
 
 	createTauriEventListener(events.recordingEvent, (payload) => {
 		if (payload.variant === "InputLost" && payload.input === "camera") {
-			setCameraDisconnected(true);
+			setCameraIssue(CAMERA_DISCONNECTED_ISSUE);
 		} else if (
 			payload.variant === "InputRestored" &&
 			payload.input === "camera"
 		) {
-			setCameraDisconnected(false);
+			setCameraIssue(null);
 		}
 	});
 
@@ -169,47 +218,26 @@ export default function () {
 	return (
 		<RecordingOptionsProvider>
 			<Show
-				when={isNativePreviewEnabled}
-				fallback={<LegacyCameraPreviewPage disconnected={cameraDisconnected} />}
+				when={isNativePreviewEnabled()}
+				fallback={<LegacyCameraPreviewPage issue={cameraIssue} />}
 			>
-				<NativeCameraPreviewPage disconnected={cameraDisconnected} />
+				<NativeCameraPreviewPage issue={cameraIssue} />
 			</Show>
 		</RecordingOptionsProvider>
 	);
 }
 
-function NativeCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
+function NativeCameraPreviewPage(props: {
+	issue: Accessor<CameraPreviewIssue | null>;
+}) {
 	const isCameraOnlyMode = () => getCameraOnlyMode();
 
 	const [state, setState] = makePersisted(
-		createStore<CameraWindowState>(
-			isCameraOnlyMode()
-				? getCameraOnlyInitialState()
-				: {
-						size: CAMERA_DEFAULT_SIZE,
-						shape: "round",
-						mirrored: false,
-					},
-		),
-		{ name: "cameraWindowState" },
+		createStore<CameraWindowState>(getDefaultCameraWindowState()),
+		{ name: CAMERA_WINDOW_STATE_STORAGE_KEY },
 	);
 
-	const [isResizing, setIsResizing] = createSignal(false);
-	const [resizeStart, setResizeStart] = createSignal({
-		size: 0,
-		x: 0,
-		y: 0,
-		corner: "",
-	});
-
-	const applyCameraOnlyDefaults = () => {
-		const cameraOnlyState = getCameraOnlyInitialState();
-		setState("size", cameraOnlyState.size);
-		setState("shape", cameraOnlyState.shape);
-	};
-
 	const centerCameraOnlyWindow = () => {
-		applyCameraOnlyDefaults();
 		ignoreMoveFor(1500);
 		void commands.ignoreCameraWindowPosition(1500);
 		void centerCurrentWindow();
@@ -222,6 +250,18 @@ function NativeCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 		if (isCameraOnlyMode()) {
 			centerCameraOnlyWindow();
 		}
+
+		const handleVisibilityChange = () => {
+			if (!document.hidden) {
+				setTimeout(() => {
+					commands.refreshCameraFeed().catch(() => {});
+				}, 500);
+			}
+		};
+		document.addEventListener("visibilitychange", handleVisibilityChange);
+		onCleanup(() =>
+			document.removeEventListener("visibilitychange", handleVisibilityChange),
+		);
 	});
 
 	createEffect(
@@ -251,7 +291,12 @@ function NativeCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 		if (clampedSize !== currentSize) {
 			setState("size", clampedSize);
 		}
-		commands.setCameraPreviewState(state);
+		commands.setCameraPreviewState({
+			size: state.size,
+			shape: state.shape,
+			mirrored: state.mirrored,
+			background_blur: normalizeBackgroundBlurMode(state.backgroundBlur),
+		});
 	});
 
 	const [cameraPreviewReady] = createResource(() =>
@@ -260,142 +305,47 @@ function NativeCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 
 	const _setCamera = createCameraMutation();
 
-	const scale = () => {
-		const normalized =
-			(state.size - CAMERA_MIN_SIZE) / (CAMERA_MAX_SIZE - CAMERA_MIN_SIZE);
-		return 0.7 + normalized * 0.3;
-	};
-
-	const handleResizeStart = (corner: string) => (e: MouseEvent) => {
-		e.preventDefault();
-		e.stopPropagation();
-		setIsResizing(true);
-		setResizeStart({ size: state.size, x: e.clientX, y: e.clientY, corner });
-	};
-
-	const handleResizeMove = (e: MouseEvent) => {
-		if (!isResizing()) return;
-		const start = resizeStart();
-		const deltaX = e.clientX - start.x;
-		const deltaY = e.clientY - start.y;
-
-		let delta = 0;
-		if (start.corner.includes("e") && start.corner.includes("s")) {
-			delta = Math.max(deltaX, deltaY);
-		} else if (start.corner.includes("e") && start.corner.includes("n")) {
-			delta = Math.max(deltaX, -deltaY);
-		} else if (start.corner.includes("w") && start.corner.includes("s")) {
-			delta = Math.max(-deltaX, deltaY);
-		} else if (start.corner.includes("w") && start.corner.includes("n")) {
-			delta = Math.max(-deltaX, -deltaY);
-		} else if (start.corner.includes("e")) {
-			delta = deltaX;
-		} else if (start.corner.includes("w")) {
-			delta = -deltaX;
-		} else if (start.corner.includes("s")) {
-			delta = deltaY;
-		} else if (start.corner.includes("n")) {
-			delta = -deltaY;
-		}
-
-		const newSize = Math.max(
-			CAMERA_MIN_SIZE,
-			Math.min(CAMERA_MAX_SIZE, start.size + delta),
-		);
-		setState("size", newSize);
-	};
-
-	const handleResizeEnd = () => {
-		setIsResizing(false);
-	};
-
-	createEffect(() => {
-		if (isResizing()) {
-			window.addEventListener("mousemove", handleResizeMove);
-			window.addEventListener("mouseup", handleResizeEnd);
-			onCleanup(() => {
-				window.removeEventListener("mousemove", handleResizeMove);
-				window.removeEventListener("mouseup", handleResizeEnd);
-			});
-		}
-	});
+	const scale = () => cameraToolbarScale(state.size);
+	const chrome = createCameraWindowChromeVisibility();
 
 	return (
 		<div
 			data-tauri-drag-region
-			class="flex relative flex-col w-screen h-screen cursor-move group"
+			class="flex relative flex-col w-screen h-screen cursor-move"
+			onPointerMove={chrome.show}
+			onPointerLeave={chrome.hide}
+			onPointerCancel={chrome.hide}
 		>
-			<Show when={props.disconnected()}>
-				<CameraDisconnectedOverlay />
+			<Show when={props.issue()}>
+				{(issue) => (
+					<CameraIssueOverlay
+						issue={issue()}
+						size={state.size}
+						class="inset-x-0 bottom-0"
+						top={CAMERA_TOOLBAR_HEIGHT}
+						borderRadius={cameraBorderRadius(state)}
+					/>
+				)}
 			</Show>
-			<div class="h-13">
+			<div class="h-14">
 				<div class="flex flex-row justify-center items-center">
-					<div
-						class="flex flex-row gap-[0.25rem] p-[0.25rem] opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 rounded-xl transition-[opacity,transform] bg-gray-1 border border-white-transparent-20 text-gray-10"
-						style={{ transform: `scale(${scale()})` }}
-					>
-						<ControlButton onClick={() => getCurrentWindow().close()}>
-							<IconCapCircleX class="size-5.5" />
-						</ControlButton>
-						<ControlButton
-							pressed={state.size >= CAMERA_PRESET_LARGE}
-							onClick={() => {
-								setState(
-									"size",
-									state.size < CAMERA_PRESET_LARGE
-										? CAMERA_PRESET_LARGE
-										: CAMERA_PRESET_SMALL,
-								);
-							}}
-						>
-							<IconCapEnlarge class="size-5.5" />
-						</ControlButton>
-						<ControlButton
-							pressed={state.shape !== "round"}
-							onClick={() =>
-								setState("shape", (s) =>
-									s === "round" ? "square" : s === "square" ? "full" : "round",
-								)
-							}
-						>
-							{state.shape === "round" && <IconCapCircle class="size-5.5" />}
-							{state.shape === "square" && <IconCapSquare class="size-5.5" />}
-							{state.shape === "full" && (
-								<IconLucideRectangleHorizontal class="size-5.5" />
-							)}
-						</ControlButton>
-						<ControlButton
-							pressed={state.mirrored}
-							onClick={() => setState("mirrored", (m) => !m)}
-						>
-							<IconCapArrows class="size-5.5" />
-						</ControlButton>
-					</div>
+					<CameraPreviewToolbar
+						state={state}
+						setState={setState}
+						visible={chrome.visible()}
+						scale={scale()}
+						onClose={() => getCurrentWindow().close()}
+					/>
 				</div>
 			</div>
 
-			<div
-				class="absolute top-0 left-0 w-4 h-4 cursor-nw-resize opacity-0 group-hover:opacity-100 transition-opacity z-10"
-				style={{ "pointer-events": "auto" }}
-				onMouseDown={handleResizeStart("nw")}
-			/>
-			<div
-				class="absolute top-0 right-0 w-4 h-4 cursor-ne-resize opacity-0 group-hover:opacity-100 transition-opacity z-10"
-				style={{ "pointer-events": "auto" }}
-				onMouseDown={handleResizeStart("ne")}
-			/>
-			<div
-				class="absolute bottom-0 left-0 w-4 h-4 cursor-sw-resize opacity-0 group-hover:opacity-100 transition-opacity z-10"
-				style={{ "pointer-events": "auto" }}
-				onMouseDown={handleResizeStart("sw")}
-			/>
-			<div
-				class="absolute bottom-0 right-0 w-4 h-4 cursor-se-resize opacity-0 group-hover:opacity-100 transition-opacity z-10"
-				style={{ "pointer-events": "auto" }}
-				onMouseDown={handleResizeStart("se")}
+			<CameraResizeHandles
+				state={state}
+				setState={setState}
+				toolbarHeight={CAMERA_TOOLBAR_HEIGHT}
+				visible={chrome.visible()}
 			/>
 
-			{/* The camera preview is rendered in Rust by wgpu */}
 			<Show when={cameraPreviewReady.loading}>
 				<div class="w-full flex-1 flex items-center justify-center">
 					<div class="text-gray-11">Loading camera...</div>
@@ -405,46 +355,21 @@ function NativeCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 	);
 }
 
-function ControlButton(
-	props: Omit<ComponentProps<typeof KToggleButton>, "type" | "class"> & {
-		active?: boolean;
-	},
-) {
-	return (
-		<KToggleButton
-			type="button"
-			class="p-2 rounded-lg ui-pressed:bg-gray-3 ui-pressed:text-gray-12"
-			{...props}
-		/>
-	);
-}
-
 // Legacy stuff below
 
-function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
+function LegacyCameraPreviewPage(props: {
+	issue: Accessor<CameraPreviewIssue | null>;
+}) {
 	const isCameraOnlyMode = () => getCameraOnlyMode();
+	const currentRecording = createCurrentRecordingQuery();
+	const isInstantRecording = () => currentRecording.data?.mode === "instant";
 
 	const [state, setState] = makePersisted(
-		createStore<CameraWindowState>(
-			isCameraOnlyMode()
-				? getCameraOnlyInitialState()
-				: {
-						size: CAMERA_DEFAULT_SIZE,
-						shape: "round",
-						mirrored: false,
-					},
-		),
-		{ name: "cameraWindowState" },
+		createStore<CameraWindowState>(getDefaultCameraWindowState()),
+		{ name: CAMERA_WINDOW_STATE_STORAGE_KEY },
 	);
 
-	const applyCameraOnlyDefaults = () => {
-		const cameraOnlyState = getCameraOnlyInitialState();
-		setState("size", cameraOnlyState.size);
-		setState("shape", cameraOnlyState.shape);
-	};
-
 	const centerCameraOnlyWindow = () => {
-		applyCameraOnlyDefaults();
 		ignoreMoveFor(1500);
 		void commands.ignoreCameraWindowPosition(1500);
 		void centerCurrentWindow();
@@ -480,24 +405,18 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 		}
 	});
 
-	const [isResizing, setIsResizing] = createSignal(false);
-	const [resizeStart, setResizeStart] = createSignal({
-		size: 0,
-		x: 0,
-		y: 0,
-		corner: "",
+	createEffect(() => {
+		commands.setCameraPreviewState({
+			size: state.size,
+			shape: state.shape,
+			mirrored: state.mirrored,
+			background_blur: normalizeBackgroundBlurMode(state.backgroundBlur),
+		});
 	});
 
 	const [hasPositioned, setHasPositioned] = createSignal(isCameraOnlyMode());
 
-	const [latestFrame, setLatestFrame] = createLazySignal<{
-		width: number;
-		data: ImageData;
-	} | null>();
-	let reusableFrameData: ImageData | null = null;
-	let reusableFrameWidth = 0;
-	let reusableFrameHeight = 0;
-
+	const [hasFrame, setHasFrame] = createSignal(false);
 	const [frameDimensions, setFrameDimensions] = createSignal<{
 		width: number;
 		height: number;
@@ -533,161 +452,177 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 		onCleanup(() => resizeObserver.disconnect());
 	});
 
-	function getReusableFrameData(width: number, height: number) {
-		if (
-			!reusableFrameData ||
-			reusableFrameWidth !== width ||
-			reusableFrameHeight !== height
-		) {
-			reusableFrameData = new ImageData(width, height);
-			reusableFrameWidth = width;
-			reusableFrameHeight = height;
-		}
+	const STALL_TIMEOUT_MS = 2000;
+	const WS_INITIAL_BACKOFF_MS = 1000;
+	const WS_MAX_BACKOFF_MS = 30000;
+	const WS_MAX_RETRIES = 10;
 
-		return reusableFrameData;
-	}
+	const { cameraWsPort } = window.__CAP__;
+	const [isWindowVisible, setIsWindowVisible] = createSignal(
+		performanceHarnessCameraOpen || !document.hidden,
+	);
+	let ws: Omit<WebSocket, "onmessage"> | undefined;
+	let canvasControls: CanvasControls | undefined;
+	let reconnectTimeout: ReturnType<typeof setTimeout> | undefined;
+	let stallCheckInterval: ReturnType<typeof setInterval> | undefined;
+	let retryCount = 0;
+	let isCleanedUp = false;
+	let lastFrameTime = 0;
+	let cameraCanvasRef: HTMLCanvasElement | undefined;
 
-	function imageDataHandler(imageData: { width: number; data: ImageData }) {
-		const currentFrame = latestFrame();
+	const closeSocket = () => {
+		const socket = ws;
+		const controls = canvasControls;
+		ws = undefined;
+		canvasControls = undefined;
+		controls?.dispose();
 		if (
-			!currentFrame ||
-			currentFrame.data !== imageData.data ||
-			currentFrame.data.width !== imageData.data.width ||
-			currentFrame.data.height !== imageData.data.height
+			socket &&
+			socket.readyState !== WebSocket.CLOSING &&
+			socket.readyState !== WebSocket.CLOSED
 		) {
-			setLatestFrame(imageData);
+			socket.close();
 		}
+	};
+
+	const initCanvasControls = () => {
+		if (!canvasControls || !cameraCanvasRef) return;
+		canvasControls.initDirectCanvas(cameraCanvasRef);
+	};
+
+	const updateFrameState = (frame: FrameData) => {
+		retryCount = 0;
+		lastFrameTime = Date.now();
 
 		const currentDimensions = frameDimensions();
 		if (
 			!currentDimensions ||
-			currentDimensions.width !== imageData.data.width ||
-			currentDimensions.height !== imageData.data.height
+			currentDimensions.width !== frame.width ||
+			currentDimensions.height !== frame.height
 		) {
-			setFrameDimensions({
-				width: imageData.data.width,
-				height: imageData.data.height,
-			});
+			setFrameDimensions({ width: frame.width, height: frame.height });
 		}
-
-		const ctx = cameraCanvasRef?.getContext("2d");
-		ctx?.putImageData(imageData.data, 0, 0);
-	}
-
-	const { cameraWsPort } = window.__CAP__;
-	const [isWindowVisible, setIsWindowVisible] = createSignal(!document.hidden);
-	const [_isConnected, setIsConnected] = createSignal(false);
-	let ws: WebSocket | undefined;
-	let reconnectInterval: ReturnType<typeof setInterval> | undefined;
+		if (canvasControls?.hasRenderedFrame()) {
+			setHasFrame(true);
+		}
+	};
 
 	onMount(() => {
-		const handleVisibilityChange = () => setIsWindowVisible(!document.hidden);
-		document.addEventListener("visibilitychange", handleVisibilityChange);
-		onCleanup(() =>
-			document.removeEventListener("visibilitychange", handleVisibilityChange),
+		const unlistenHarnessCameraOpened = listen(
+			"instant-mode-harness-camera-opened",
+			() => {
+				performanceHarnessCameraOpen = true;
+				setIsWindowVisible(true);
+				lastFrameTime = Date.now();
+			},
 		);
+
+		const handleVisibilityChange = () => {
+			const visible = performanceHarnessCameraOpen || !document.hidden;
+			setIsWindowVisible(visible);
+			if (visible) {
+				lastFrameTime = Date.now();
+				commands.refreshCameraFeed().catch(() => {});
+			}
+		};
+		document.addEventListener("visibilitychange", handleVisibilityChange);
+		onCleanup(() => {
+			document.removeEventListener("visibilitychange", handleVisibilityChange);
+			void unlistenHarnessCameraOpened.then((unlisten) => unlisten());
+		});
 	});
 
 	const createSocket = () => {
-		const socket = new WebSocket(`ws://localhost:${cameraWsPort}`);
-		socket.binaryType = "arraybuffer";
+		const instantQuery = isInstantRecording() ? "?instant=true" : "";
+		const [socket, _isConnected, _isWorkerReady, controls] = createImageDataWS(
+			`ws://localhost:${cameraWsPort}${instantQuery}`,
+			updateFrameState,
+			() => commands.refreshCameraFeed().catch(() => {}),
+			{ powerPreference: "low-power" },
+		);
+		canvasControls = controls;
+		initCanvasControls();
 
 		socket.addEventListener("open", () => {
-			setIsConnected(true);
+			lastFrameTime = Date.now();
+			setHasFrame(false);
+			setFrameDimensions(null);
 		});
 
 		socket.addEventListener("close", () => {
-			setIsConnected(false);
+			if (canvasControls === controls) {
+				canvasControls = undefined;
+			}
+			if (ws === socket) ws = undefined;
+			scheduleReconnect();
 		});
 
 		socket.addEventListener("error", () => {
-			setIsConnected(false);
+			controls.dispose();
 		});
-
-		socket.onmessage = (event) => {
-			if (!isWindowVisible()) return;
-
-			const buffer = event.data as ArrayBuffer;
-			const clamped = new Uint8ClampedArray(buffer);
-			if (clamped.length < 24) {
-				console.error("Received frame too small to contain metadata");
-				return;
-			}
-
-			const metadataOffset = clamped.length - 24;
-			const meta = new DataView(buffer, metadataOffset, 24);
-			const strideBytes = meta.getUint32(0, true);
-			const height = meta.getUint32(4, true);
-			const width = meta.getUint32(8, true);
-
-			if (!width || !height) {
-				console.error("Received invalid frame dimensions", { width, height });
-				return;
-			}
-
-			const source = clamped.subarray(0, metadataOffset);
-			const expectedRowBytes = width * 4;
-			const expectedLength = expectedRowBytes * height;
-			const availableLength = strideBytes * height;
-
-			if (
-				strideBytes === 0 ||
-				strideBytes < expectedRowBytes ||
-				source.length < availableLength
-			) {
-				console.error("Received invalid frame stride", {
-					strideBytes,
-					expectedRowBytes,
-					height,
-					sourceLength: source.length,
-				});
-				return;
-			}
-
-			const imageData = getReusableFrameData(width, height);
-			if (strideBytes === expectedRowBytes) {
-				imageData.data.set(source.subarray(0, expectedLength));
-			} else {
-				for (let row = 0; row < height; row += 1) {
-					const srcStart = row * strideBytes;
-					const destStart = row * expectedRowBytes;
-					imageData.data.set(
-						source.subarray(srcStart, srcStart + expectedRowBytes),
-						destStart,
-					);
-				}
-			}
-			imageDataHandler({ width, data: imageData });
-		};
 
 		return socket;
 	};
 
+	const scheduleReconnect = () => {
+		if (
+			isCleanedUp ||
+			reconnectTimeout ||
+			ws ||
+			!isWindowVisible() ||
+			retryCount >= WS_MAX_RETRIES
+		) {
+			return;
+		}
+
+		const backoffMs = Math.min(
+			WS_INITIAL_BACKOFF_MS * 2 ** retryCount,
+			WS_MAX_BACKOFF_MS,
+		);
+
+		reconnectTimeout = setTimeout(() => {
+			reconnectTimeout = undefined;
+			if (isCleanedUp || ws || !isWindowVisible()) return;
+			retryCount += 1;
+			lastFrameTime = Date.now();
+			ws = createSocket();
+		}, backoffMs);
+	};
+
 	const stopSocket = () => {
-		if (reconnectInterval) {
-			clearInterval(reconnectInterval);
-			reconnectInterval = undefined;
+		if (reconnectTimeout) {
+			clearTimeout(reconnectTimeout);
+			reconnectTimeout = undefined;
 		}
 
-		if (ws) {
-			ws.close();
-			ws = undefined;
+		if (stallCheckInterval) {
+			clearInterval(stallCheckInterval);
+			stallCheckInterval = undefined;
 		}
 
-		setIsConnected(false);
+		closeSocket();
 	};
 
 	const startSocket = () => {
 		if (ws || !isWindowVisible()) return;
 
+		retryCount = 0;
+		lastFrameTime = Date.now();
 		ws = createSocket();
 
-		reconnectInterval = setInterval(() => {
-			if (!ws || ws.readyState !== WebSocket.OPEN) {
-				if (ws) ws.close();
-				ws = createSocket();
+		stallCheckInterval = setInterval(() => {
+			if (
+				!performanceHarnessCameraOpen &&
+				ws?.readyState === WebSocket.OPEN &&
+				isWindowVisible() &&
+				lastFrameTime > 0 &&
+				Date.now() - lastFrameTime > STALL_TIMEOUT_MS
+			) {
+				lastFrameTime = Date.now();
+				commands.refreshCameraFeed().catch(() => {});
+				ws.close();
 			}
-		}, 5000);
+		}, STALL_TIMEOUT_MS);
 	};
 
 	createEffect(() => {
@@ -698,72 +633,25 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 		}
 	});
 
+	createEffect(
+		on(
+			isInstantRecording,
+			() => {
+				if (!isWindowVisible()) return;
+				stopSocket();
+				startSocket();
+			},
+			{ defer: true },
+		),
+	);
+
 	onCleanup(() => {
-		reusableFrameData = null;
-		reusableFrameWidth = 0;
-		reusableFrameHeight = 0;
+		isCleanedUp = true;
 		stopSocket();
 	});
 
-	const scale = () => {
-		const normalized =
-			(state.size - CAMERA_MIN_SIZE) / (CAMERA_MAX_SIZE - CAMERA_MIN_SIZE);
-		return 0.7 + normalized * 0.3;
-	};
-
-	const handleResizeStart = (corner: string) => (e: MouseEvent) => {
-		e.preventDefault();
-		e.stopPropagation();
-		setIsResizing(true);
-		setResizeStart({ size: state.size, x: e.clientX, y: e.clientY, corner });
-	};
-
-	const handleResizeMove = (e: MouseEvent) => {
-		if (!isResizing()) return;
-		const start = resizeStart();
-		const deltaX = e.clientX - start.x;
-		const deltaY = e.clientY - start.y;
-
-		let delta = 0;
-		if (start.corner.includes("e") && start.corner.includes("s")) {
-			delta = Math.max(deltaX, deltaY);
-		} else if (start.corner.includes("e") && start.corner.includes("n")) {
-			delta = Math.max(deltaX, -deltaY);
-		} else if (start.corner.includes("w") && start.corner.includes("s")) {
-			delta = Math.max(-deltaX, deltaY);
-		} else if (start.corner.includes("w") && start.corner.includes("n")) {
-			delta = Math.max(-deltaX, -deltaY);
-		} else if (start.corner.includes("e")) {
-			delta = deltaX;
-		} else if (start.corner.includes("w")) {
-			delta = -deltaX;
-		} else if (start.corner.includes("s")) {
-			delta = deltaY;
-		} else if (start.corner.includes("n")) {
-			delta = -deltaY;
-		}
-
-		const newSize = Math.max(
-			CAMERA_MIN_SIZE,
-			Math.min(CAMERA_MAX_SIZE, start.size + delta),
-		);
-		setState("size", newSize);
-	};
-
-	const handleResizeEnd = () => {
-		setIsResizing(false);
-	};
-
-	createEffect(() => {
-		if (isResizing()) {
-			window.addEventListener("mousemove", handleResizeMove);
-			window.addEventListener("mouseup", handleResizeEnd);
-			onCleanup(() => {
-				window.removeEventListener("mousemove", handleResizeMove);
-				window.removeEventListener("mouseup", handleResizeEnd);
-			});
-		}
-	});
+	const scale = () => cameraToolbarScale(state.size);
+	const chrome = createCameraWindowChromeVisibility();
 
 	const [_windowSize] = createResource(
 		() =>
@@ -774,14 +662,13 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 				frameDimensions()?.height,
 			] as const,
 		async ([size, shape, frameWidth, frameHeight]) => {
-			const BAR_HEIGHT = 56;
-			const base = Math.max(CAMERA_MIN_SIZE, Math.min(CAMERA_MAX_SIZE, size));
-			const aspect = frameWidth && frameHeight ? frameWidth / frameHeight : 1;
-			const windowWidth =
-				shape === "full" ? (aspect >= 1 ? base * aspect : base) : base;
-			const windowHeight =
-				shape === "full" ? (aspect >= 1 ? base : base / aspect) : base;
-			const totalHeight = windowHeight + BAR_HEIGHT;
+			const { width: windowWidth, height: windowHeight } =
+				cameraPreviewDimensions(
+					size,
+					shape,
+					frameWidth && frameHeight ? frameWidth / frameHeight : undefined,
+				);
+			const totalHeight = windowHeight + CAMERA_TOOLBAR_HEIGHT;
 
 			const currentWindow = getCurrentWindow();
 			await currentWindow.setSize(new LogicalSize(windowWidth, totalHeight));
@@ -790,7 +677,11 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 			const monitors = await availableMonitors();
 			const activeMonitor = monitor ?? monitors[0];
 			if (!activeMonitor) {
-				return { size: base, windowWidth, windowHeight };
+				return {
+					size: Math.min(windowWidth, windowHeight),
+					windowWidth,
+					windowHeight,
+				};
 			}
 
 			const scalingFactor = activeMonitor.scaleFactor;
@@ -876,87 +767,37 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 				}
 			}
 
-			return { width, height, size: base, windowWidth, windowHeight };
+			return { width, height, size, windowWidth, windowHeight };
 		},
 	);
-
-	let cameraCanvasRef: HTMLCanvasElement | undefined;
 
 	onMount(() => getCurrentWindow().show());
 
 	return (
 		<div
 			data-tauri-drag-region
-			class="flex relative flex-col w-screen h-screen cursor-move group"
+			class="flex relative flex-col w-screen h-screen cursor-move"
 			style={{ "border-radius": cameraBorderRadius(state) }}
+			onPointerMove={chrome.show}
+			onPointerLeave={chrome.hide}
+			onPointerCancel={chrome.hide}
 		>
-			<Show when={props.disconnected()}>
-				<CameraDisconnectedOverlay />
-			</Show>
 			<div class="h-14">
 				<div class="flex flex-row justify-center items-center">
-					<div
-						class="flex flex-row gap-[0.25rem] p-[0.25rem] opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 rounded-xl transition-[opacity,transform] bg-gray-1 border border-white-transparent-20 text-gray-10"
-						style={{ transform: `scale(${scale()})` }}
-					>
-						<ControlButton onClick={() => getCurrentWindow().close()}>
-							<IconCapCircleX class="size-5.5" />
-						</ControlButton>
-						<ControlButton
-							pressed={state.size >= CAMERA_PRESET_LARGE}
-							onClick={() => {
-								setState(
-									"size",
-									state.size < CAMERA_PRESET_LARGE
-										? CAMERA_PRESET_LARGE
-										: CAMERA_PRESET_SMALL,
-								);
-							}}
-						>
-							<IconCapEnlarge class="size-5.5" />
-						</ControlButton>
-						<ControlButton
-							pressed={state.shape !== "round"}
-							onClick={() =>
-								setState("shape", (s) =>
-									s === "round" ? "square" : s === "square" ? "full" : "round",
-								)
-							}
-						>
-							{state.shape === "round" && <IconCapCircle class="size-5.5" />}
-							{state.shape === "square" && <IconCapSquare class="size-5.5" />}
-							{state.shape === "full" && (
-								<IconLucideRectangleHorizontal class="size-5.5" />
-							)}
-						</ControlButton>
-						<ControlButton
-							pressed={state.mirrored}
-							onClick={() => setState("mirrored", (m) => !m)}
-						>
-							<IconCapArrows class="size-5.5" />
-						</ControlButton>
-					</div>
+					<CameraPreviewToolbar
+						state={state}
+						setState={setState}
+						visible={chrome.visible()}
+						scale={scale()}
+						onClose={() => getCurrentWindow().close()}
+					/>
 				</div>
 			</div>
-			<div
-				class="absolute top-0 left-0 w-4 h-4 cursor-nw-resize opacity-0 group-hover:opacity-100 transition-opacity z-10"
-				style={{ "pointer-events": "auto" }}
-				onMouseDown={handleResizeStart("nw")}
-			/>
-			<div
-				class="absolute top-0 right-0 w-4 h-4 cursor-ne-resize opacity-0 group-hover:opacity-100 transition-opacity z-10"
-				style={{ "pointer-events": "auto" }}
-				onMouseDown={handleResizeStart("ne")}
-			/>
-			<div
-				class="absolute bottom-0 left-0 w-4 h-4 cursor-sw-resize opacity-0 group-hover:opacity-100 transition-opacity z-10"
-				style={{ "pointer-events": "auto" }}
-				onMouseDown={handleResizeStart("sw")}
-			/>
-			<div
-				class="absolute bottom-0 right-0 w-4 h-4 cursor-se-resize opacity-0 group-hover:opacity-100 transition-opacity z-10"
-				style={{ "pointer-events": "auto" }}
-				onMouseDown={handleResizeStart("se")}
+			<CameraResizeHandles
+				state={state}
+				setState={setState}
+				toolbarHeight={CAMERA_TOOLBAR_HEIGHT}
+				visible={chrome.visible()}
 			/>
 			<div
 				ref={containerRef}
@@ -967,74 +808,58 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 				data-tauri-drag-region
 			>
 				<Suspense fallback={<CameraLoadingState />}>
-					<Show when={latestFrame() !== null && latestFrame() !== undefined}>
-						<Canvas
-							latestFrame={latestFrame}
-							state={state}
-							ref={cameraCanvasRef}
-							containerSize={externalContainerSize() ?? undefined}
-						/>
+					<Canvas
+						frameDimensions={frameDimensions}
+						state={state}
+						onCanvas={(canvas) => {
+							cameraCanvasRef = canvas;
+							initCanvasControls();
+						}}
+						containerSize={externalContainerSize() ?? undefined}
+					/>
+					<Show when={!hasFrame()}>
+						<CameraLoadingState />
 					</Show>
 				</Suspense>
+				<Show when={props.issue()}>
+					{(issue) => <CameraIssueOverlay issue={issue()} size={state.size} />}
+				</Show>
 			</div>
 		</div>
 	);
 }
 
 function Canvas(props: {
-	latestFrame: Accessor<{ width: number; data: ImageData } | null | undefined>;
+	frameDimensions: Accessor<
+		{ width: number; height: number } | null | undefined
+	>;
 	state: CameraWindowState;
-	ref: HTMLCanvasElement | undefined;
+	onCanvas: (canvas: HTMLCanvasElement) => void;
 	containerSize?: { width: number; height: number };
 }) {
 	const style = () => {
-		const frame = props.latestFrame();
-		if (!frame) return {};
+		const dimensions = props.frameDimensions();
+		if (!dimensions) return {};
 
-		const aspectRatio = frame.data.width / frame.data.height;
+		const aspectRatio = dimensions.width / dimensions.height;
 
-		// Use container size if available (for external resize), otherwise use state.size
-		const base = props.containerSize
-			? Math.min(props.containerSize.width, props.containerSize.height)
-			: props.state.size;
+		const targetSize =
+			props.containerSize ??
+			cameraPreviewDimensions(props.state.size, props.state.shape, aspectRatio);
+		const targetAspectRatio = targetSize.width / targetSize.height;
+		const size =
+			aspectRatio > targetAspectRatio
+				? {
+						height: targetSize.height,
+						width: targetSize.height * aspectRatio,
+					}
+				: {
+						height: targetSize.width / aspectRatio,
+						width: targetSize.width,
+					};
 
-		// Replicate window size logic synchronously for the canvas
-		const winWidth =
-			props.state.shape === "full"
-				? aspectRatio >= 1
-					? base * aspectRatio
-					: base
-				: base;
-		const winHeight =
-			props.state.shape === "full"
-				? aspectRatio >= 1
-					? base
-					: base / aspectRatio
-				: base;
-
-		if (props.state.shape === "full") {
-			return {
-				width: `${winWidth}px`,
-				height: `${winHeight}px`,
-				transform: props.state.mirrored ? "scaleX(-1)" : "scaleX(1)",
-			};
-		}
-
-		const size = (() => {
-			if (aspectRatio > 1)
-				return {
-					width: base * aspectRatio,
-					height: base,
-				};
-			else
-				return {
-					width: base,
-					height: base / aspectRatio,
-				};
-		})();
-
-		const left = aspectRatio > 1 ? (size.width - base) / 2 : 0;
-		const top = aspectRatio > 1 ? 0 : (base - size.height) / 2;
+		const left = (size.width - targetSize.width) / 2;
+		const top = (size.height - targetSize.height) / 2;
 
 		return {
 			width: `${size.width}px`,
@@ -1050,9 +875,7 @@ function Canvas(props: {
 			data-tauri-drag-region
 			class={cx("absolute")}
 			style={style()}
-			width={props.latestFrame()?.data.width}
-			height={props.latestFrame()?.data.height}
-			ref={props.ref}
+			ref={(canvas) => props.onCanvas(canvas)}
 		/>
 	);
 }
@@ -1065,23 +888,68 @@ function CameraLoadingState() {
 	);
 }
 
-function cameraBorderRadius(state: CameraWindowState) {
-	if (state.shape === "round") return "9999px";
+function cameraOverlayTextMetrics(size: number) {
 	const normalized =
-		(state.size - CAMERA_MIN_SIZE) / (CAMERA_MAX_SIZE - CAMERA_MIN_SIZE);
-	const radius = 3 + normalized * 1.5;
-	return `${radius}rem`;
+		(Math.max(CAMERA_MIN_SIZE, Math.min(CAMERA_MAX_SIZE, size)) -
+			CAMERA_MIN_SIZE) /
+		(CAMERA_MAX_SIZE - CAMERA_MIN_SIZE);
+	const titleSize = 0.75 + normalized * 0.375;
+	const messageSize = 0.625 + normalized * 0.25;
+	const lineHeight = 1.2 + normalized * 0.2;
+	const gap = 0.375 + normalized * 0.25;
+	const maxWidth = Math.max(7.5, Math.min(18, size / 16));
+
+	return {
+		gap: `${gap}rem`,
+		maxWidth: `${maxWidth}rem`,
+		messageLineHeight: `${lineHeight}rem`,
+		messageSize: `${messageSize}rem`,
+		titleSize: `${titleSize}rem`,
+	};
 }
 
-function CameraDisconnectedOverlay() {
+function CameraIssueOverlay(props: {
+	issue: CameraPreviewIssue;
+	size: number;
+	class?: string;
+	top?: number;
+	borderRadius?: string;
+}) {
+	const textMetrics = () => cameraOverlayTextMetrics(props.size);
+	const style = () => {
+		const base = { "border-radius": props.borderRadius ?? "inherit" };
+		if (props.top === undefined) return base;
+		return { ...base, top: `${props.top}px` };
+	};
+
 	return (
 		<div
-			class="absolute inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm px-4 pointer-events-none"
-			style={{ "border-radius": "inherit" }}
+			class={cx(
+				"absolute z-10 flex items-center justify-center overflow-hidden bg-black/75 backdrop-blur-xs px-4 pointer-events-none",
+				props.class ?? "inset-0",
+			)}
+			style={style()}
 		>
-			<p class="text-center text-sm font-medium text-white/90">
-				Camera disconnected
-			</p>
+			<div
+				class="flex flex-col items-center text-center text-white"
+				style={{ gap: textMetrics().gap, "max-width": textMetrics().maxWidth }}
+			>
+				<p
+					class="font-semibold text-white"
+					style={{ "font-size": textMetrics().titleSize }}
+				>
+					{props.issue.title}
+				</p>
+				<p
+					class="text-white/75"
+					style={{
+						"font-size": textMetrics().messageSize,
+						"line-height": textMetrics().messageLineHeight,
+					}}
+				>
+					{props.issue.message}
+				</p>
+			</div>
 		</div>
 	);
 }

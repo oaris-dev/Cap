@@ -109,9 +109,16 @@ impl TestRecording {
     }
 
     fn write_recording_meta(&self, status: StudioRecordingStatus) -> std::io::Result<()> {
+        Self::write_recording_meta_at(&self.project_path, status)
+    }
+
+    fn write_recording_meta_at(
+        project_path: &Path,
+        status: StudioRecordingStatus,
+    ) -> std::io::Result<()> {
         let meta = RecordingMeta {
             platform: None,
-            project_path: self.project_path.clone(),
+            project_path: project_path.to_path_buf(),
             pretty_name: "Test Recording".to_string(),
             sharing: None,
             upload: None,
@@ -136,7 +143,7 @@ impl TestRecording {
             })),
         };
 
-        let meta_path = self.project_path.join("recording-meta.json");
+        let meta_path = project_path.join("recording-meta.json");
         std::fs::write(meta_path, serde_json::to_string_pretty(&meta)?)?;
         Ok(())
     }
@@ -476,26 +483,34 @@ fn test_should_not_check_for_recovery_complete() {
 }
 
 #[test]
-fn test_should_check_for_recovery_failed_with_other_error() {
+fn test_failed_recording_is_terminal_for_startup_recovery() {
     test_utils::init_tracing();
 
     let recording = TestRecording::new().unwrap();
+    let display_dir = recording.create_display_dir(0).unwrap();
+    recording
+        .write_manifest(
+            0,
+            "display",
+            &[("segment_001.m4s", true, 150)],
+            Some("init.mp4"),
+        )
+        .unwrap();
+    std::fs::write(display_dir.join("init.mp4"), create_minimal_mp4_data()).unwrap();
+    std::fs::write(display_dir.join("segment_001.m4s"), vec![1u8; 150]).unwrap();
     recording
         .write_recording_meta(StudioRecordingStatus::Failed {
             error: "Some other error".to_string(),
         })
         .unwrap();
 
-    let meta = RecordingMeta::load_for_project(recording.path()).unwrap();
-    let studio_meta = meta.studio_meta().unwrap();
-    let status = studio_meta.status();
+    let inspected = RecoveryManager::inspect_recording(recording.path()).unwrap();
+    assert_eq!(inspected.recoverable_segments.len(), 1);
 
-    match status {
-        StudioRecordingStatus::Failed { error } => {
-            assert_eq!(error, "Some other error");
-        }
-        _ => panic!("Status should be Failed"),
-    }
+    assert!(
+        RecoveryManager::find_incomplete_single(recording.path()).is_none(),
+        "Failed recordings should not be startup recovery candidates"
+    );
 }
 
 #[test]
@@ -536,6 +551,39 @@ fn test_find_incomplete_with_no_segments_directory() {
         incomplete.is_empty(),
         "Should not find incomplete recordings without segments directory"
     );
+}
+
+#[test]
+fn test_find_incomplete_preserves_failed_error_without_segments() {
+    test_utils::init_tracing();
+
+    let recordings_dir = TempDir::new().unwrap();
+    let project_path = recordings_dir.path().join("failed-start.cap");
+    std::fs::create_dir_all(&project_path).unwrap();
+    let original_error =
+        "RefreshShareableContent: The user declined TCCs for application, window, display capture";
+
+    TestRecording::write_recording_meta_at(
+        &project_path,
+        StudioRecordingStatus::Failed {
+            error: original_error.to_string(),
+        },
+    )
+    .unwrap();
+
+    let incomplete = RecoveryManager::find_incomplete(recordings_dir.path());
+
+    assert!(
+        incomplete.is_empty(),
+        "Should not find incomplete recordings without segments directory"
+    );
+
+    let meta = RecordingMeta::load_for_project(&project_path).unwrap();
+    let studio_meta = meta.studio_meta().unwrap();
+    match studio_meta.status() {
+        StudioRecordingStatus::Failed { error } => assert_eq!(error, original_error),
+        _ => panic!("Status should preserve original failed-start error"),
+    }
 }
 
 #[test]
@@ -1047,8 +1095,7 @@ fn test_status_transition_logic() {
     let should_check = |status: &StudioRecordingStatus| -> bool {
         match status {
             StudioRecordingStatus::InProgress | StudioRecordingStatus::NeedsRemux => true,
-            StudioRecordingStatus::Failed { error } => error != "No recoverable segments found",
-            StudioRecordingStatus::Complete => false,
+            StudioRecordingStatus::Failed { .. } | StudioRecordingStatus::Complete => false,
         }
     };
 
@@ -1065,10 +1112,10 @@ fn test_status_transition_logic() {
         "Complete should not be checked"
     );
     assert!(
-        should_check(&StudioRecordingStatus::Failed {
+        !should_check(&StudioRecordingStatus::Failed {
             error: "Some error".to_string()
         }),
-        "Failed with other error should be checked"
+        "Failed with other error should not be checked"
     );
     assert!(
         !should_check(&StudioRecordingStatus::Failed {
@@ -1173,5 +1220,373 @@ fn test_orphaned_segment_minimum_size() {
     assert!(
         valid_meta.len() >= min_valid_size,
         "Valid segment should be at or above threshold"
+    );
+}
+
+fn make_synthetic_video_frame(width: u32, height: u32) -> ffmpeg::frame::Video {
+    let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
+    for plane_idx in 0..frame.planes() {
+        let data = frame.data_mut(plane_idx);
+        for byte in data.iter_mut() {
+            *byte = 128;
+        }
+    }
+    frame
+}
+
+fn synthetic_video_info() -> cap_media_info::VideoInfo {
+    cap_media_info::VideoInfo {
+        pixel_format: cap_media_info::Pixel::NV12,
+        width: 320,
+        height: 240,
+        time_base: ffmpeg::Rational(1, 1_000_000),
+        frame_rate: ffmpeg::Rational(30, 1),
+    }
+}
+
+fn write_synthetic_fragments(display_dir: &Path, total_frames: u64, segment_duration: Duration) {
+    let mut encoder = SegmentedVideoEncoder::init(
+        display_dir.to_path_buf(),
+        synthetic_video_info(),
+        SegmentedVideoEncoderConfig {
+            segment_duration,
+            ..Default::default()
+        },
+    )
+    .expect("synthetic encoder init");
+
+    for i in 0..total_frames {
+        let frame = make_synthetic_video_frame(320, 240);
+        let ts = Duration::from_micros(i * 33_333);
+        encoder.queue_frame(frame, ts).expect("queue frame");
+    }
+
+    drop(encoder);
+}
+
+#[test]
+fn recover_after_simulated_crash_produces_playable_mp4_with_preserved_duration() {
+    test_utils::init_tracing();
+
+    let recording = TestRecording::new().unwrap();
+    let display_dir = recording.create_display_dir(0).unwrap();
+
+    let total_frames = 180u64;
+    write_synthetic_fragments(&display_dir, total_frames, Duration::from_secs(2));
+
+    let m4s_segments: Vec<_> = std::fs::read_dir(&display_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "m4s"))
+        .collect();
+    assert!(
+        m4s_segments.len() >= 2,
+        "expected at least 2 complete segments before crash, got {}",
+        m4s_segments.len()
+    );
+    let init_path = display_dir.join("init.mp4");
+    assert!(
+        init_path.exists(),
+        "init.mp4 must exist after simulated crash"
+    );
+
+    recording
+        .write_recording_meta(StudioRecordingStatus::InProgress)
+        .unwrap();
+
+    let incomplete = RecoveryManager::inspect_recording(recording.path())
+        .expect("inspect should find recoverable fragments");
+    assert!(!incomplete.recoverable_segments.is_empty());
+
+    RecoveryManager::recover(&incomplete).expect("recovery should succeed");
+
+    let display_mp4 = recording
+        .path()
+        .join("content/segments/segment-0/display.mp4");
+    assert!(
+        display_mp4.exists(),
+        "display.mp4 must exist after recovery"
+    );
+
+    assert!(
+        probe_video_can_decode(&display_mp4).unwrap_or(false),
+        "recovered display.mp4 must be decodable"
+    );
+
+    let duration = cap_enc_ffmpeg::remux::get_media_duration(&display_mp4)
+        .expect("recovered display.mp4 must expose a duration");
+    assert!(
+        duration >= Duration::from_secs(4),
+        "recovered duration {duration:?} below 4s (wrote ~6s)"
+    );
+
+    assert!(
+        !display_dir.exists() || std::fs::read_dir(&display_dir).unwrap().next().is_none(),
+        "display/ fragment dir should be emptied or removed after successful recovery"
+    );
+}
+
+#[test]
+fn recover_preserves_fragments_when_progressive_mp4_validation_fails() {
+    test_utils::init_tracing();
+
+    let recording = TestRecording::new().unwrap();
+    let display_dir = recording.create_display_dir(0).unwrap();
+
+    write_synthetic_fragments(&display_dir, 180, Duration::from_secs(2));
+
+    let init_path = display_dir.join("init.mp4");
+    std::fs::write(&init_path, vec![0u8; 2048]).unwrap();
+
+    let fragment_count_before = std::fs::read_dir(&display_dir).unwrap().count();
+    assert!(
+        fragment_count_before > 1,
+        "expected multiple files before recovery"
+    );
+
+    recording
+        .write_recording_meta(StudioRecordingStatus::InProgress)
+        .unwrap();
+
+    let incomplete = RecoveryManager::inspect_recording(recording.path())
+        .expect("inspect should still detect fragments");
+
+    let result = RecoveryManager::recover(&incomplete);
+    assert!(
+        result.is_err(),
+        "recovery must propagate failure when progressive MP4 is unplayable"
+    );
+    assert!(
+        matches!(
+            result,
+            Err(RecoveryError::UnplayableVideo(_)) | Err(RecoveryError::VideoConcat(_))
+        ),
+        "failure should be UnplayableVideo or VideoConcat, got {result:?}"
+    );
+
+    assert!(
+        display_dir.exists(),
+        "display/ fragment dir must remain after validation failure"
+    );
+    let fragment_count_after = std::fs::read_dir(&display_dir).unwrap().count();
+    assert_eq!(
+        fragment_count_after, fragment_count_before,
+        "no fragments should be deleted after validation failure"
+    );
+
+    let display_mp4 = recording
+        .path()
+        .join("content/segments/segment-0/display.mp4");
+    assert!(
+        !display_mp4.exists(),
+        "invalid concatenated display.mp4 should be removed on failure"
+    );
+}
+
+#[test]
+fn finalize_to_progressive_mp4_includes_respawn_fragments() {
+    test_utils::init_tracing();
+
+    let recording = TestRecording::new().unwrap();
+    let display_dir = recording.create_display_dir(0).unwrap();
+
+    write_synthetic_fragments(&display_dir, 300, Duration::from_secs(2));
+
+    let original_segments: Vec<_> = std::fs::read_dir(&display_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "m4s"))
+        .collect();
+    let original_count = original_segments.len();
+    assert!(
+        original_count >= 2,
+        "expected at least 2 original segments, got {original_count}"
+    );
+
+    let respawn_dir = display_dir.join("respawn-1");
+    std::fs::create_dir_all(&respawn_dir).unwrap();
+    write_synthetic_fragments(&respawn_dir, 300, Duration::from_secs(2));
+
+    let respawn_segments: Vec<_> = std::fs::read_dir(&respawn_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "m4s"))
+        .collect();
+    let respawn_count = respawn_segments.len();
+    assert!(
+        respawn_count >= 2,
+        "expected at least 2 respawn fragments, got {respawn_count}"
+    );
+
+    let output = recording.path().join("finalized.mp4");
+    RecoveryManager::finalize_to_progressive_mp4(&display_dir, &output)
+        .expect("finalize_to_progressive_mp4 should succeed with respawn fragments");
+
+    let duration = cap_enc_ffmpeg::remux::get_media_duration(&output).expect("read duration");
+
+    let single_dir_output = recording.path().join("single_dir_baseline.mp4");
+    let baseline_dir = recording.path().join("baseline_dir");
+    std::fs::create_dir_all(&baseline_dir).unwrap();
+    write_synthetic_fragments(&baseline_dir, 300, Duration::from_secs(2));
+    RecoveryManager::finalize_to_progressive_mp4(&baseline_dir, &single_dir_output)
+        .expect("baseline finalize should succeed");
+    let baseline_duration =
+        cap_enc_ffmpeg::remux::get_media_duration(&single_dir_output).expect("baseline duration");
+
+    assert!(
+        duration.as_secs_f64() > baseline_duration.as_secs_f64() * 1.5,
+        "finalized duration {duration:?} must be substantially longer than single-dir baseline \
+         {baseline_duration:?} when respawn fragments exist"
+    );
+
+    assert!(
+        probe_video_can_decode(&output).unwrap_or(false),
+        "finalized MP4 with respawn fragments must be decodable"
+    );
+}
+
+#[test]
+fn finalize_to_progressive_mp4_rescues_pending_tmp_fragments_in_respawn_dir() {
+    test_utils::init_tracing();
+
+    let recording = TestRecording::new().unwrap();
+    let display_dir = recording.create_display_dir(0).unwrap();
+    write_synthetic_fragments(&display_dir, 300, Duration::from_secs(2));
+
+    let respawn_dir = display_dir.join("respawn-1");
+    std::fs::create_dir_all(&respawn_dir).unwrap();
+    write_synthetic_fragments(&respawn_dir, 300, Duration::from_secs(2));
+
+    let respawn_entries: Vec<_> = std::fs::read_dir(&respawn_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|ext| ext == "m4s")
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("segment_"))
+        })
+        .collect();
+
+    let to_disguise = respawn_entries
+        .last()
+        .expect("respawn dir should have at least one .m4s");
+    let tmp_target = to_disguise.with_extension("m4s.tmp");
+    let file_size_before = std::fs::metadata(to_disguise).unwrap().len();
+    std::fs::rename(to_disguise, &tmp_target).unwrap();
+    assert!(tmp_target.exists(), "renamed .tmp should exist");
+    assert!(
+        !to_disguise.exists(),
+        "original .m4s should no longer exist"
+    );
+
+    let output = recording.path().join("finalized_with_tmp.mp4");
+    RecoveryManager::finalize_to_progressive_mp4(&display_dir, &output)
+        .expect("finalize should succeed and rescue the .tmp");
+
+    assert!(
+        to_disguise.exists() || !tmp_target.exists(),
+        "either the .tmp was rescued into .m4s ({}) or still present as .tmp ({})",
+        to_disguise.display(),
+        tmp_target.display()
+    );
+
+    if to_disguise.exists() {
+        let size_after = std::fs::metadata(to_disguise).unwrap().len();
+        assert_eq!(
+            size_after, file_size_before,
+            "rescued .m4s should have same byte count as the original .m4s.tmp"
+        );
+    }
+
+    assert!(
+        probe_video_can_decode(&output).unwrap_or(false),
+        "output MP4 should decode cleanly even after rescuing a .tmp fragment"
+    );
+}
+
+#[test]
+fn finalize_to_progressive_mp4_rejects_truncated_tmp_fragments_in_respawn_dir() {
+    test_utils::init_tracing();
+
+    let recording = TestRecording::new().unwrap();
+    let display_dir = recording.create_display_dir(0).unwrap();
+    write_synthetic_fragments(&display_dir, 300, Duration::from_secs(2));
+
+    let respawn_dir = display_dir.join("respawn-1");
+    std::fs::create_dir_all(&respawn_dir).unwrap();
+    write_synthetic_fragments(&respawn_dir, 300, Duration::from_secs(2));
+
+    let respawn_entries: Vec<_> = std::fs::read_dir(&respawn_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|ext| ext == "m4s")
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("segment_"))
+        })
+        .collect();
+
+    let to_disguise = respawn_entries
+        .last()
+        .expect("respawn dir should have at least one .m4s");
+    let tmp_target = to_disguise.with_extension("m4s.tmp");
+    std::fs::rename(to_disguise, &tmp_target).unwrap();
+
+    let original_len = std::fs::metadata(&tmp_target).unwrap().len();
+    let truncated_len = original_len.saturating_sub(12);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp_target)
+        .unwrap()
+        .set_len(truncated_len)
+        .unwrap();
+
+    let output = recording.path().join("finalized_with_truncated_tmp.mp4");
+    RecoveryManager::finalize_to_progressive_mp4(&display_dir, &output)
+        .expect("finalize should succeed while skipping truncated tmp");
+
+    let corrupt_marker = respawn_dir.join(format!(
+        "{}.corrupt",
+        tmp_target.file_name().unwrap().to_string_lossy()
+    ));
+
+    assert!(tmp_target.exists(), "truncated tmp must remain quarantined");
+    assert!(
+        corrupt_marker.exists(),
+        "truncated tmp must get a .corrupt marker for future retries"
+    );
+    assert!(
+        probe_video_can_decode(&output).unwrap_or(false),
+        "output MP4 should decode cleanly after skipping truncated tmp"
+    );
+}
+
+#[test]
+fn finalize_to_progressive_mp4_public_api_produces_playable_output() {
+    test_utils::init_tracing();
+
+    let recording = TestRecording::new().unwrap();
+    let display_dir = recording.create_display_dir(0).unwrap();
+
+    write_synthetic_fragments(&display_dir, 120, Duration::from_secs(2));
+
+    let output = recording.path().join("finalized.mp4");
+    let produced = RecoveryManager::finalize_to_progressive_mp4(&display_dir, &output)
+        .expect("finalize_to_progressive_mp4 should succeed on valid fragments");
+
+    assert_eq!(produced, output);
+    assert!(output.exists(), "progressive MP4 must exist");
+    assert!(
+        probe_video_can_decode(&output).unwrap_or(false),
+        "finalized MP4 must be decodable"
+    );
+
+    assert!(
+        display_dir.join("init.mp4").exists(),
+        "finalize_to_progressive_mp4 must not delete fragments - that's the caller's responsibility"
     );
 }

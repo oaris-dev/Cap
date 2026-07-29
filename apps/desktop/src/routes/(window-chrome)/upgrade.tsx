@@ -274,7 +274,7 @@ export default function Page() {
 			)}
 			{!upgradeComplete() &&
 				(license.data?.type === "commercial" ? (
-					<div class="p-8 mx-auto w-full max-w-[700px] rounded-xl border shadow-sm bg-gray-2 border-gray-3">
+					<div class="p-8 mx-auto w-full max-w-[700px] rounded-xl border shadow-xs bg-gray-2 border-gray-3">
 						<div class="space-y-6">
 							<div class="flex flex-col items-center mb-6 text-center">
 								<h3 class="text-2xl font-medium">Commercial License</h3>
@@ -327,7 +327,7 @@ export default function Page() {
 				) : (
 					<>
 						<div class="text-center">
-							<h1 class="text-4xl md:text-4xl mb-6 tracking-[-.05em] font-medium text-[--text-primary]">
+							<h1 class="text-4xl md:text-4xl mb-6 tracking-[-.05em] font-medium text-(--text-primary)">
 								Early Adopter Pricing
 							</h1>
 						</div>
@@ -351,7 +351,7 @@ export default function Page() {
 										riveInstance.play("card-stack");
 									}
 								}}
-								class="flex flex-col flex-1 justify-between p-3 h-[700px ] bg-gray-3 rounded-2xl border border-gray-3 shadow-sm text-card-foreground md:p-3"
+								class="flex flex-col flex-1 justify-between p-3 h-[700px ] bg-gray-3 rounded-2xl border border-gray-3 shadow-xs text-card-foreground md:p-3"
 							>
 								<div class="space-y-5">
 									<div class="flex flex-col gap-6 items-center">
@@ -360,7 +360,7 @@ export default function Page() {
 											<h3 class="text-2xl font-medium tracking-tight leading-5">
 												Commercial License
 											</h3>
-											<p class="mt-2 text-sm text-[--text-tertiary]">
+											<p class="mt-2 text-sm text-(--text-tertiary)">
 												For commercial use
 											</p>
 										</div>
@@ -382,7 +382,7 @@ export default function Page() {
 										</div>
 										<div
 											onClick={() => setIsCommercialAnnual((v) => !v)}
-											class="px-3 py-2 text-center rounded-full border border-transparent transition-all duration-200 cursor-pointer bg-gray-5 hover:border-gray-400"
+											class="px-3 py-2 text-center rounded-full border border-transparent transition-all duration-200 bg-gray-5 hover:border-gray-400"
 										>
 											<p class="text-xs text-gray-12">
 												Switch to {isCommercialAnnual() ? "lifetime" : "yearly"}
@@ -401,9 +401,9 @@ export default function Page() {
 											].map((feature) => (
 												<li class="flex justify-start items-center">
 													<div class="flex justify-center items-center p-0 m-0 w-6 h-6">
-														<IconLucideCheck class="w-4 h-4 text-[--text-primary]" />
+														<IconLucideCheck class="w-4 h-4 text-(--text-primary)" />
 													</div>
-													<span class="ml-1 text-[0.9rem] text-[--text-primary]">
+													<span class="ml-1 text-[0.9rem] text-(--text-primary)">
 														{feature}
 													</span>
 												</li>
@@ -420,7 +420,7 @@ export default function Page() {
 										onClick={() => openCommercialCheckout.mutate()}
 										disabled={openCommercialCheckout.isPending}
 										variant="dark"
-										class="w-full !rounded-full !h-[48px] text-lg font-medium"
+										class="w-full rounded-full! h-[48px]! text-lg font-medium"
 										size="lg"
 									>
 										{openCommercialCheckout.isPending
@@ -429,7 +429,7 @@ export default function Page() {
 									</Button>
 									<p
 										onClick={() => setOpenLicenseDialog(true)}
-										class="mb-2 text-sm transition-colors cursor-pointer text-gray-11 hover:text-gray-12"
+										class="mb-2 text-sm transition-colors text-gray-11 hover:text-gray-12"
 									>
 										Already have a license key?
 									</p>
@@ -456,7 +456,7 @@ export default function Page() {
 										riveInstance.play("items-coming-in");
 									}
 								}}
-								class="flex-grow p-3 h-[700px] flex-1 bg-gray-12 rounded-2xl border shadow-sm text-card-foreground md:p-3"
+								class="grow p-3 h-[700px] flex-1 bg-gray-12 rounded-2xl border shadow-xs text-card-foreground md:p-3"
 							>
 								<div class="flex flex-col justify-between space-y-5 h-full">
 									<div class="flex flex-col gap-6 items-center px-6">
@@ -487,7 +487,7 @@ export default function Page() {
 										</div>
 										<div
 											onClick={() => setIsProAnnual((v) => !v)}
-											class="px-3 py-2 text-center bg-blue-500 rounded-full border border-transparent transition-all duration-200 cursor-pointer hover:border-blue-400"
+											class="px-3 py-2 text-center bg-blue-500 rounded-full border border-transparent transition-all duration-200 hover:border-blue-400"
 										>
 											<p class="text-xs text-solid-white">
 												Switch to {isProAnnual() ? "monthly" : "yearly"}:{" "}
@@ -511,7 +511,7 @@ export default function Page() {
 									</div>
 									<Button
 										variant="blue"
-										class="!rounded-full !text-lg w-full mx-auto"
+										class="rounded-full! text-lg! w-full mx-auto"
 										onClick={openCheckoutInExternalBrowser}
 									>
 										{loading() ? "Loading..." : "Upgrade to Cap Pro"}
@@ -563,7 +563,7 @@ const ActivateLicenseDialog = ({ open, onOpenChange }: Props) => {
 					licenseKey: value.licenseKey,
 				},
 			});
-			await queryClient.refetchQueries({ queryKey: ["bruh"] });
+			await queryClient.refetchQueries({ queryKey: ["licenseQuery"] });
 		},
 	}));
 	return (

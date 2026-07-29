@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     str::FromStr,
     sync::{Mutex, PoisonError},
     time::{Duration, Instant},
@@ -8,11 +8,12 @@ use std::{
 use base64::prelude::*;
 use cap_recording::screen_capture::ScreenCaptureTarget;
 
+use crate::exit_shutdown::{abort_join_handles, read_target_under_cursor};
 use crate::{
     App, ArcLock, general_settings,
     recording_settings::RecordingTargetMode,
     window_exclusion::WindowExclusion,
-    windows::{CapWindowId, ShowCapWindow},
+    windows::{CapWindowId, ShowCapWindow, hide_overlay, show_overlay},
 };
 use scap_targets::{
     Display, DisplayId, Window, WindowId,
@@ -24,7 +25,7 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 use tauri_plugin_global_shortcut::{GlobalShortcut, GlobalShortcutExt};
 use tauri_specta::Event;
 use tokio::task::JoinHandle;
-use tracing::{error, instrument};
+use tracing::{debug, error, instrument};
 
 #[derive(tauri_specta::Event, Serialize, Type, Clone)]
 pub struct TargetUnderCursor {
@@ -97,7 +98,7 @@ pub async fn open_target_select_overlays(
                 .iter()
                 .any(|display_id| display_id == &existing_id)
         {
-            let _ = window.hide();
+            hide_overlay(&window);
             state.destroy(&existing_id, app.global_shortcut());
         }
     }
@@ -111,10 +112,10 @@ pub async fn open_target_select_overlays(
         .get(&app);
 
         if let Some(window) = existing_window {
-            window.show().ok();
+            show_overlay(&window);
 
             if should_focus {
-                window.set_focus().ok();
+                focus_target_select_overlay(&window);
             }
 
             state.spawn(display_id, window.clone());
@@ -126,10 +127,7 @@ pub async fn open_target_select_overlays(
             .show(&app)
             .await
             {
-                window.show().ok();
-                if should_focus {
-                    window.set_focus().ok();
-                }
+                finish_created_target_select_overlay(&window, should_focus);
             }
         } else {
             let app_clone = app.clone();
@@ -142,10 +140,7 @@ pub async fn open_target_select_overlays(
                 .show(&app_clone)
                 .await
                 {
-                    window.show().ok();
-                    if should_focus {
-                        window.set_focus().ok();
-                    }
+                    finish_created_target_select_overlay(&window, should_focus);
                 }
             });
         }
@@ -157,7 +152,7 @@ pub async fn open_target_select_overlays(
     .get(&app);
 
     if let Some(window) = focus_window {
-        window.set_focus().ok();
+        focus_target_select_overlay(&window);
     }
 
     let window_exclusions = general_settings::GeneralSettingsStore::get(&app)
@@ -171,33 +166,36 @@ pub async fn open_target_select_overlays(
         let app = app.clone();
 
         async move {
-            loop {
-                {
-                    let display = focused_target
+            while let Some((display, window)) = read_target_under_cursor(
+                || crate::app_is_exiting(&app),
+                || {
+                    focused_target
                         .as_ref()
                         .map(|v| v.display())
-                        .unwrap_or_else(scap_targets::Display::get_containing_cursor);
-                    let window = focused_target
+                        .unwrap_or_else(scap_targets::Display::get_containing_cursor)
+                },
+                || {
+                    focused_target
                         .as_ref()
                         .map(|v| v.window().and_then(|id| scap_targets::Window::from_id(&id)))
-                        .unwrap_or_else(scap_targets::Window::get_topmost_at_cursor);
+                        .unwrap_or_else(scap_targets::Window::get_topmost_at_cursor)
+                },
+            ) {
+                let _ = TargetUnderCursor {
+                    display_id: display.map(|d| d.id()),
+                    window: window.and_then(|w| {
+                        if should_skip_window(&w, &window_exclusions) {
+                            return None;
+                        }
 
-                    let _ = TargetUnderCursor {
-                        display_id: display.map(|d| d.id()),
-                        window: window.and_then(|w| {
-                            if should_skip_window(&w, &window_exclusions) {
-                                return None;
-                            }
-
-                            Some(WindowUnderCursor {
-                                id: w.id(),
-                                bounds: w.display_relative_logical_bounds()?,
-                                app_name: w.owner_name()?,
-                            })
-                        }),
-                    }
-                    .emit(&app);
+                        Some(WindowUnderCursor {
+                            id: w.id(),
+                            bounds: w.display_relative_logical_bounds()?,
+                            app_name: w.owner_name()?,
+                        })
+                    }),
                 }
+                .emit(&app);
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -211,14 +209,31 @@ pub async fn open_target_select_overlays(
         .replace(handle)
     {
         task.abort();
-    } else {
-        app.global_shortcut()
-            .register("Escape")
-            .map_err(|err| error!("Error registering global keyboard shortcut for Escape: {err}"))
-            .ok();
     }
+    state.register_escape(app.global_shortcut());
 
     Ok(())
+}
+
+fn finish_created_target_select_overlay(window: &WebviewWindow, should_focus: bool) {
+    #[cfg(target_os = "macos")]
+    let _ = (window, should_focus);
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.show().ok();
+        if should_focus {
+            focus_target_select_overlay(window);
+        }
+    }
+}
+
+fn focus_target_select_overlay(window: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    let _ = window;
+
+    #[cfg(not(target_os = "macos"))]
+    window.set_focus().ok();
 }
 
 fn should_skip_window(window: &Window, exclusions: &[WindowExclusion]) -> bool {
@@ -254,8 +269,8 @@ pub async fn update_camera_overlay_bounds(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let window = app
-        .get_webview_window("camera")
+    let window = CapWindowId::Camera
+        .get(&app)
         .ok_or("Camera window not found")?;
 
     let width_u32 = width as u32;
@@ -289,25 +304,42 @@ pub async fn update_camera_overlay_bounds(
 
 #[specta::specta]
 #[tauri::command]
-#[instrument(skip(app, state))]
+#[instrument(skip(app, _state))]
 pub async fn close_target_select_overlays(
     app: AppHandle,
-    state: tauri::State<'_, WindowFocusManager>,
+    _state: tauri::State<'_, WindowFocusManager>,
 ) -> Result<(), String> {
-    let mut closed_display_ids = Vec::new();
+    close_target_select_overlay_windows(&app);
+
+    Ok(())
+}
+
+pub fn close_target_select_overlay_windows(app: &AppHandle) {
+    let state = app.try_state::<WindowFocusManager>();
+    let mut saw_overlay = false;
+
+    if let Some(state) = state.as_ref() {
+        state.clear_overlay_restore_labels();
+    }
 
     for (id, window) in app.webview_windows() {
         if let Ok(CapWindowId::TargetSelectOverlay { display_id }) = CapWindowId::from_str(&id) {
-            let _ = window.hide();
-            closed_display_ids.push(display_id);
+            saw_overlay = true;
+            // On Windows, hide() leaves the DirectComposition transparency surface composited on
+            // screen (ghost overlay). Closing the window fully releases the surface.
+            #[cfg(windows)]
+            let _ = window.close();
+            #[cfg(not(windows))]
+            hide_overlay(&window);
+            if let Some(state) = state.as_ref() {
+                state.destroy(&display_id, app.global_shortcut());
+            }
         }
     }
 
-    for display_id in closed_display_ids {
-        state.destroy(&display_id, app.global_shortcut());
+    if !saw_overlay && let Some(state) = state {
+        state.shutdown(app);
     }
-
-    Ok(())
 }
 
 #[specta::specta]
@@ -406,66 +438,124 @@ pub async fn focus_window(window_id: WindowId) -> Result<(), String> {
 pub struct WindowFocusManager {
     task: Mutex<Option<JoinHandle<()>>>,
     tasks: Mutex<HashMap<String, JoinHandle<()>>>,
+    escape_registered: Mutex<bool>,
+    restore_overlay_labels: Mutex<HashSet<String>>,
 }
 
 impl WindowFocusManager {
+    fn abort_all_tasks(&self) {
+        let tasks = {
+            let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+            tasks.drain().map(|(_, task)| task).collect::<Vec<_>>()
+        };
+        let task = self
+            .task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        abort_join_handles(tasks, task);
+    }
+
     pub fn spawn(&self, id: &DisplayId, window: WebviewWindow) {
         let display_id = id.clone();
-        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
-        tasks.insert(
-            id.to_string(),
-            tokio::spawn(async move {
-                let app = window.app_handle();
-                let mut main_window_was_seen = false;
+        let task_id = id.to_string();
+        let handle = tokio::spawn(async move {
+            let app = window.app_handle();
+            let mut main_window_was_seen = false;
 
-                loop {
-                    let cap_main = CapWindowId::Main.get(app);
-                    let cap_settings = CapWindowId::Settings.get(app);
-
-                    let main_window_available = cap_main.is_some();
-                    let settings_window_available = cap_settings.is_some();
-
-                    if main_window_available || settings_window_available {
-                        main_window_was_seen = true;
-                    }
-
-                    if main_window_was_seen && !main_window_available && !settings_window_available
-                    {
-                        window.hide().ok();
-                        app.state::<WindowFocusManager>()
-                            .finish(&display_id, app.global_shortcut());
-                        break;
-                    }
-
-                    #[cfg(windows)]
-                    if window.is_visible().unwrap_or(false)
-                        && let Some(cap_main) = cap_main
-                    {
-                        let should_refocus = cap_main.is_focused().ok().unwrap_or_default()
-                            || window.is_focused().unwrap_or_default();
-
-                        if !should_refocus {
-                            window.set_focus().ok();
-                        }
-                    }
-
-                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            loop {
+                if crate::app_is_exiting(app) {
+                    break;
                 }
-            }),
-        );
+
+                let cap_main = CapWindowId::Main.get(app);
+                let cap_settings = CapWindowId::Settings.get(app);
+
+                let main_window_available = cap_main.is_some();
+                let settings_window_available = cap_settings.is_some();
+
+                if main_window_available || settings_window_available {
+                    main_window_was_seen = true;
+                }
+
+                if main_window_was_seen && !main_window_available && !settings_window_available {
+                    hide_overlay(&window);
+                    app.state::<WindowFocusManager>()
+                        .finish(&display_id, app.global_shortcut());
+                    break;
+                }
+
+                #[cfg(windows)]
+                if window.is_visible().unwrap_or(false)
+                    && let Some(cap_main) = cap_main
+                {
+                    // Every overlay window (one per display) runs this loop. Checking only
+                    // `window`/main focus made each inactive overlay steal focus from the
+                    // overlay the user is interacting with on multi-monitor setups, firing a
+                    // `blur` that cancelled the in-progress crop drag. Focus held by any
+                    // overlay is fine, so only refocus when nothing of ours is focused.
+                    let overlay_focused = app.webview_windows().iter().any(|(label, other)| {
+                        matches!(
+                            CapWindowId::from_str(label),
+                            Ok(CapWindowId::TargetSelectOverlay { .. })
+                        ) && other.is_focused().unwrap_or(false)
+                    });
+
+                    let should_refocus =
+                        overlay_focused || cap_main.is_focused().ok().unwrap_or_default();
+
+                    if !should_refocus {
+                        window.set_focus().ok();
+                    }
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
+        });
+
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(task) = tasks.insert(task_id, handle) {
+            task.abort();
+        }
+    }
+
+    pub fn remember_overlay_for_restore(&self, label: String) {
+        let mut labels = self
+            .restore_overlay_labels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        labels.insert(label);
+    }
+
+    pub fn take_overlay_restore_labels(&self) -> HashSet<String> {
+        let mut labels = self
+            .restore_overlay_labels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *labels)
+    }
+
+    pub fn clear_overlay_restore_labels(&self) {
+        let mut labels = self
+            .restore_overlay_labels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        labels.clear();
     }
 
     fn finish<R: tauri::Runtime>(&self, id: &DisplayId, global_shortcut: &GlobalShortcut<R>) {
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.remove(&id.to_string());
+        drop(tasks);
 
+        self.finish_if_idle(global_shortcut);
+    }
+
+    fn finish_if_idle<R: tauri::Runtime>(&self, global_shortcut: &GlobalShortcut<R>) {
+        let tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         if tasks.is_empty() {
-            global_shortcut
-                .unregister("Escape")
-                .map_err(|err| {
-                    error!("Error unregistering global keyboard shortcut for Escape: {err}")
-                })
-                .ok();
+            drop(tasks);
+            self.unregister_escape(global_shortcut);
 
             if let Some(task) = self
                 .task
@@ -486,6 +576,44 @@ impl WindowFocusManager {
         }
         drop(tasks);
 
-        self.finish(id, global_shortcut);
+        self.finish_if_idle(global_shortcut);
+    }
+
+    pub fn shutdown(&self, app: &AppHandle) {
+        self.abort_all_tasks();
+
+        self.unregister_escape(app.global_shortcut());
+    }
+
+    fn register_escape<R: tauri::Runtime>(&self, global_shortcut: &GlobalShortcut<R>) {
+        let mut registered = self
+            .escape_registered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *registered {
+            return;
+        }
+
+        match global_shortcut.register("Escape") {
+            Ok(()) => *registered = true,
+            Err(err) => error!("Error registering global keyboard shortcut for Escape: {err}"),
+        }
+    }
+
+    fn unregister_escape<R: tauri::Runtime>(&self, global_shortcut: &GlobalShortcut<R>) {
+        {
+            let mut registered = self
+                .escape_registered
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !*registered {
+                return;
+            }
+            *registered = false;
+        }
+
+        if let Err(err) = global_shortcut.unregister("Escape") {
+            debug!("Error unregistering global keyboard shortcut for Escape: {err}");
+        }
     }
 }

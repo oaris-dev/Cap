@@ -67,6 +67,9 @@ function createServerEnv() {
 			GOOGLE_CLIENT_ID: z.string().optional(),
 			GOOGLE_CLIENT_SECRET: z.string().optional(),
 
+			APPLE_CLIENT_ID: z.string().optional(),
+			APPLE_CLIENT_SECRET: z.string().optional(),
+
 			/// WorkOS SSO
 			// Provide these to use WorkOS for enterprise SSO
 			WORKOS_CLIENT_ID: z.string().optional(),
@@ -76,6 +79,10 @@ function createServerEnv() {
 			CAP_VIDEOS_DEFAULT_PUBLIC: boolString(true).describe(
 				"Should videos be public or private by default",
 			),
+			CAP_CHROME_EXTENSION_ID: z
+				.string()
+				.optional()
+				.describe("Chrome Web Store extension id allowed to receive auth keys"),
 			CAP_ALLOWED_SIGNUP_DOMAINS: z
 				.string()
 				.optional()
@@ -102,9 +109,7 @@ function createServerEnv() {
 			MISTRAL_API_URL: z
 				.string()
 				.optional()
-				.describe(
-					"Mistral API URL. Defaults to https://api.mistral.ai",
-				),
+				.describe("Mistral API URL. Defaults to https://api.mistral.ai"),
 			ANTHROPIC_API_KEY: z.string().optional().describe("AI chat"),
 			OPENAI_API_KEY: z.string().optional().describe("AI summaries"),
 			GROQ_API_KEY: z.string().optional().describe("AI summaries"),

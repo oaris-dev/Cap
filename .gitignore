@@ -6,6 +6,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+.deepsec
 
 node_modules
 dist
@@ -17,12 +18,15 @@ dist-ssr
 .env.test
 target
 target-agent
+target-phase8
+outputs
 .cursorrules
 .github/hooks
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
+!.vscode/settings.json
 .idea
 .DS_Store
 *.suo
@@ -31,6 +35,7 @@ target-agent
 *.sln
 *.sw?
 .turbo
+bun.lock
 pnpm-lock.yaml
 .zed
 .output
@@ -44,6 +49,8 @@ apps/storybook/storybook-static
 *.tsbuildinfo
 .cargo/config.toml
 tauri.windows.conf.json
+tauri.macos.conf.json
+tauri.linux.conf.json
 .vercel
 
 # sst
@@ -63,7 +70,9 @@ scripts/releases-backfill-data.txt
 
 # SEO agent state (machine-local, contains sensitive ranking data)
 /seo/
+scripts/seo/
 /docs/
+/.growth-agent/
 
 # OpenCode commands (local)
 .opencode/

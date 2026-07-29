@@ -9,6 +9,7 @@ workspace = true
 [features]
 default = []
 test-utils = []
+memory-profiling = ["dep:dhat"]
 
 [dependencies]
 cap-audio = { path = "../audio" }
@@ -27,6 +28,7 @@ cap-camera-ffmpeg = { path = "../camera-ffmpeg" }
 cap-enc-ffmpeg = { path = "../enc-ffmpeg" }
 cap-frame-converter = { path = "../frame-converter" }
 cap-timestamp = { path = "../timestamp" }
+cap-muxer-protocol = { path = "../cap-muxer-protocol" }
 scap-ffmpeg = { path = "../scap-ffmpeg" }
 
 specta = { workspace = true }
@@ -57,6 +59,8 @@ inquire = "0.7.5"
 replace_with = "0.1.8"
 retry = "2.1.0"
 sysinfo = "0.35"
+parking_lot = "0.12"
+dhat = { version = "0.3", optional = true }
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -68,6 +72,7 @@ objc2 = "0.6"
 objc2-app-kit = "0.3.1"
 core-graphics = "0.24.0"
 core-foundation = "0.10.0"
+coreaudio-rs = { version = "0.11.3", features = ["audio_unit"] }
 foreign-types-shared = "0.3"
 libc = "0.2"
 
@@ -85,12 +90,18 @@ windows = { workspace = true, features = [
     "Win32_Storage_Xps",
 ] }
 
+cap-d3d-adapter = { path = "../d3d-adapter" }
 cap-enc-mediafoundation = { path = "../enc-mediafoundation" }
 cap-mediafoundation-ffmpeg = { path = "../mediafoundation-ffmpeg" }
 cap-mediafoundation-utils = { path = "../mediafoundation-utils" }
 cap-camera-windows = { path = "../camera-windows" }
 scap-direct3d = { path = "../scap-direct3d" }
 scap-cpal = { path = "../scap-cpal" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.11.0", default-features = false, features = ["tokio"] }
+pipewire = "0.10.0"
+x11rb = { version = "0.13.2", features = ["xfixes"] }
 
 [dev-dependencies]
 tempfile = "3.20.0"
@@ -117,3 +128,9 @@ name = "playback-test-runner"
 
 [[example]]
 name = "real-device-test-runner"
+
+[[example]]
+name = "memory-stress-test"
+
+[[example]]
+name = "instant-mode-profile"

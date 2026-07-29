@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     path::PathBuf,
     rc::Rc,
     sync::{Arc, mpsc},
@@ -17,7 +17,14 @@ use crate::{DecodedFrame, PixelFormat};
 
 use super::frame_converter::{copy_bgra_to_rgba, copy_rgba_plane};
 use super::multi_position::{DecoderPoolManager, MultiPositionDecoderConfig, ScrubDetector};
-use super::{DecoderInitResult, DecoderType, FRAME_CACHE_SIZE, VideoDecoderMessage, pts_to_frame};
+use super::{
+    DecoderInitResult, DecoderType, FRAME_CACHE_SIZE, VideoDecoderMessage, pts_to_frame,
+    record_pts_hole,
+};
+
+const MAX_RELAXED_FALLBACK_DISTANCE: u32 = 8;
+const SCRUB_REUSE_THRESHOLD_SECS: f32 = 0.5;
+const DECODER_REQUEST_CLUSTER_GAP_FRAMES: u32 = FRAME_CACHE_SIZE as u32 / 2;
 
 #[derive(Clone)]
 struct FrameData {
@@ -28,7 +35,7 @@ struct FrameData {
 
 #[derive(Clone)]
 struct ProcessedFrame {
-    _number: u32,
+    number: u32,
     width: u32,
     height: u32,
     format: PixelFormat,
@@ -215,7 +222,7 @@ impl CachedFrame {
                 let mut img = image_buf;
                 let (data, fmt, y_str, uv_str) = processor.extract_raw(&mut img);
                 Self(ProcessedFrame {
-                    _number: number,
+                    number,
                     width,
                     height,
                     format: fmt,
@@ -229,7 +236,7 @@ impl CachedFrame {
             _ => {
                 let black_frame = vec![0u8; (width * height * 4) as usize];
                 Self(ProcessedFrame {
-                    _number: number,
+                    number,
                     width,
                     height,
                     format: PixelFormat::Rgba,
@@ -338,6 +345,10 @@ struct DecoderInstance {
     path: PathBuf,
     tokio_handle: TokioHandle,
     keyframe_index: Option<Arc<cap_video_decode::avassetreader::KeyframeIndex>>,
+    /// Previous frame number this instance vended, for pts-hole discovery.
+    /// Lives on the instance because the reader vends in pts order between
+    /// resets, but request batches may be served by different pool decoders.
+    prev_vended: Option<u32>,
 }
 
 impl DecoderInstance {
@@ -360,6 +371,7 @@ impl DecoderInstance {
             path,
             tokio_handle,
             keyframe_index,
+            prev_vended: None,
         })
     }
 
@@ -369,6 +381,7 @@ impl DecoderInstance {
                 self.is_done = false;
                 self.frames_iter_valid = true;
                 self.health.reset_counters();
+                self.prev_vended = None;
             }
             Err(e) => {
                 tracing::error!(
@@ -400,6 +413,7 @@ impl DecoderInstance {
         self.is_done = false;
         self.frames_iter_valid = true;
         self.health = DecoderHealth::new();
+        self.prev_vended = None;
         Ok(())
     }
 
@@ -496,11 +510,19 @@ impl AVAssetReaderDecoder {
         })
     }
 
-    fn select_best_decoder(&mut self, requested_time: f32) -> (usize, bool) {
+    fn select_best_decoder(&mut self, requested_time: f32, is_scrubbing: bool) -> (usize, bool) {
         let decoder_count = self.decoders.len();
-        let (best_id, _distance, needs_reset) = self
-            .pool_manager
-            .find_best_decoder_for_time(requested_time, decoder_count);
+        let (best_id, _distance, needs_reset) = if is_scrubbing {
+            self.pool_manager
+                .find_best_decoder_for_time_with_reuse_threshold(
+                    requested_time,
+                    decoder_count,
+                    SCRUB_REUSE_THRESHOLD_SECS,
+                )
+        } else {
+            self.pool_manager
+                .find_best_decoder_for_time(requested_time, decoder_count)
+        };
 
         let decoder_idx = best_id.min(decoder_count.saturating_sub(1));
 
@@ -560,38 +582,102 @@ impl AVAssetReaderDecoder {
         let mut last_active_frame = None::<u32>;
         let last_sent_frame = Rc::new(RefCell::new(None::<ProcessedFrame>));
         let first_ever_frame = Rc::new(RefCell::new(None::<ProcessedFrame>));
+        // pts holes (start frame -> first frame after the hole) discovered
+        // from decode-order jumps. These are facts about the file — decoders
+        // vend samples in pts order, so a jump between consecutive vends can
+        // only mean no samples exist in between — and therefore survive
+        // resets and cache eviction.
+        let mut pts_holes = BTreeMap::<u32, u32>::new();
+        // Content of the most recently served VFR hold, kept across request
+        // batches so a hole keeps rendering its true frame even after the
+        // pre-hole frame leaves the cache.
+        let mut gap_hold: Option<ProcessedFrame> = None;
 
         let processor = ImageBufProcessor::new();
 
         struct PendingRequest {
             frame: u32,
+            max_fallback_distance: u32,
             sender: oneshot::Sender<DecodedFrame>,
         }
 
-        while let Ok(r) = rx.recv() {
-            let mut pending_requests: Vec<PendingRequest> = Vec::with_capacity(8);
+        let mut deferred_requests = VecDeque::<PendingRequest>::new();
 
-            match r {
-                VideoDecoderMessage::GetFrame(requested_time, sender) => {
-                    let frame = (requested_time * fps as f32).floor() as u32;
-                    if !sender.is_closed() {
-                        pending_requests.push(PendingRequest { frame, sender });
+        loop {
+            let mut pending_requests: Vec<PendingRequest> = Vec::with_capacity(8);
+            let processing_deferred = !deferred_requests.is_empty();
+
+            if let Some(request) = deferred_requests.pop_front() {
+                if request.sender.is_closed() {
+                    continue;
+                }
+                let mut last_frame = request.frame;
+                pending_requests.push(request);
+                while deferred_requests.front().is_some_and(|next| {
+                    next.frame.saturating_sub(last_frame) <= DECODER_REQUEST_CLUSTER_GAP_FRAMES
+                }) {
+                    if let Some(request) = deferred_requests.pop_front() {
+                        if request.sender.is_closed() {
+                            continue;
+                        }
+                        last_frame = request.frame;
+                        pending_requests.push(request);
                     }
                 }
-            }
-
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    VideoDecoderMessage::GetFrame(requested_time, sender) => {
+            } else {
+                let Ok(message) = rx.recv() else {
+                    break;
+                };
+                match message {
+                    VideoDecoderMessage::GetFrame(
+                        requested_time,
+                        max_fallback_distance,
+                        sender,
+                    ) => {
                         let frame = (requested_time * fps as f32).floor() as u32;
                         if !sender.is_closed() {
-                            pending_requests.push(PendingRequest { frame, sender });
+                            pending_requests.push(PendingRequest {
+                                frame,
+                                max_fallback_distance,
+                                sender,
+                            });
+                        }
+                    }
+                }
+
+                while let Ok(message) = rx.try_recv() {
+                    match message {
+                        VideoDecoderMessage::GetFrame(
+                            requested_time,
+                            max_fallback_distance,
+                            sender,
+                        ) => {
+                            let frame = (requested_time * fps as f32).floor() as u32;
+                            if !sender.is_closed() {
+                                pending_requests.push(PendingRequest {
+                                    frame,
+                                    max_fallback_distance,
+                                    sender,
+                                });
+                            }
                         }
                     }
                 }
             }
 
             pending_requests.sort_by_key(|r| r.frame);
+
+            if !processing_deferred
+                && let Some(split_index) = pending_requests
+                    .windows(2)
+                    .position(|requests| {
+                        requests[1].frame.saturating_sub(requests[0].frame)
+                            > DECODER_REQUEST_CLUSTER_GAP_FRAMES
+                    })
+                    .map(|index| index + 1)
+            {
+                deferred_requests.extend(pending_requests.drain(split_index..));
+            }
 
             let is_scrubbing = if let Some(first_req) = pending_requests.first() {
                 this.scrub_detector.record_request(first_req.frame)
@@ -615,6 +701,40 @@ impl AVAssetReaderDecoder {
             }
             pending_requests = unfulfilled;
 
+            // Requests inside a KNOWN pts hole are answered with the hole's
+            // start frame — the true VFR hold (the frame simply stayed on
+            // screen) — without touching the decoder. This keeps the
+            // post-hole frames cached and the reader parked, however long the
+            // hole runs; decoding ahead here would evict the very frames the
+            // requests are marching towards. Only recorded holes qualify: a
+            // bare "some cached frame lies beyond the request" test would
+            // also match disjoint cache islands left by seeks, and serving
+            // stale content there would freeze playback on old frames.
+            let mut still_unfulfilled = Vec::with_capacity(pending_requests.len());
+            for req in pending_requests.drain(..) {
+                let hole_start = pts_holes
+                    .range(..=req.frame)
+                    .next_back()
+                    .filter(|&(_, &end)| req.frame < end)
+                    .map(|(&start, _)| start);
+                let Some(hole_start) = hole_start else {
+                    still_unfulfilled.push(req);
+                    continue;
+                };
+                let data = cache
+                    .get(&hole_start)
+                    .map(|c| c.data().clone())
+                    .or_else(|| gap_hold.clone().filter(|h| h.number == hole_start));
+                if let Some(data) = data {
+                    gap_hold = Some(data.clone());
+                    *last_sent_frame.borrow_mut() = Some(data.clone());
+                    let _ = req.sender.send(data.to_decoded_frame());
+                } else {
+                    still_unfulfilled.push(req);
+                }
+            }
+            pending_requests = still_unfulfilled;
+
             if pending_requests.is_empty() {
                 continue;
             }
@@ -623,8 +743,13 @@ impl AVAssetReaderDecoder {
             let max_requested_frame = pending_requests.iter().map(|r| r.frame).max().unwrap();
             let requested_frame = min_requested_frame;
             let requested_time = requested_frame as f32 / fps as f32;
+            let minimum_fallback_frame = pending_requests
+                .iter()
+                .map(|r| r.frame.saturating_sub(r.max_fallback_distance))
+                .min()
+                .unwrap_or(requested_frame);
 
-            let (decoder_idx, was_reset) = this.select_best_decoder(requested_time);
+            let (decoder_idx, was_reset) = this.select_best_decoder(requested_time, is_scrubbing);
 
             let cache_min = if was_reset {
                 min_requested_frame.saturating_sub(FRAME_CACHE_SIZE as u32 * 2)
@@ -647,6 +772,10 @@ impl AVAssetReaderDecoder {
             let mut exit = false;
             let mut frames_iterated = 0u32;
             let mut last_decoded_position: Option<f32> = None;
+            // Newest vended frame below the fallback floor: after a seek the
+            // reader re-vends from the keyframe at-or-before the request, and
+            // that frame is the true VFR hold for requests inside a pts hole.
+            let mut hold_candidate: Option<(u32, R<cv::ImageBuf>)> = None;
 
             {
                 let decoder = &mut this.decoders[decoder_idx];
@@ -662,6 +791,10 @@ impl AVAssetReaderDecoder {
                                 error = %e,
                                 "Failed to read frame, skipping"
                             );
+                            // A skipped frame breaks the vend continuity that
+                            // hole discovery relies on; a jump across it is
+                            // not evidence of a hole.
+                            decoder.prev_vended = None;
                             continue;
                         }
                     };
@@ -670,7 +803,26 @@ impl AVAssetReaderDecoder {
                     let current_frame =
                         pts_to_frame(frame.pts().value, Rational::new(1, frame.pts().scale), fps);
 
+                    if let Some(prev) = decoder.prev_vended
+                        && current_frame > prev + 1
+                    {
+                        record_pts_hole(&mut pts_holes, prev, current_frame);
+                    }
+                    decoder.prev_vended = Some(current_frame);
+
                     let position_secs = current_frame as f32 / fps as f32;
+                    last_decoded_position = Some(position_secs);
+                    decoder.is_done = false;
+
+                    if current_frame < minimum_fallback_frame {
+                        // Keep a handle to it instead of discarding it: if the
+                        // requests land inside a pts hole this is the only
+                        // at-or-before content the reader will ever vend.
+                        if let Some(buf) = frame.image_buf() {
+                            hold_candidate = Some((current_frame, buf.retained()));
+                        }
+                        continue;
+                    }
 
                     let Some(frame) = frame.image_buf() else {
                         tracing::debug!(
@@ -680,15 +832,11 @@ impl AVAssetReaderDecoder {
                         continue;
                     };
 
-                    last_decoded_position = Some(position_secs);
-
                     let cache_frame = CachedFrame::new(&processor, frame.retained(), current_frame);
 
                     if first_ever_frame.borrow().is_none() {
                         *first_ever_frame.borrow_mut() = Some(cache_frame.data().clone());
                     }
-
-                    decoder.is_done = false;
 
                     let exceeds_cache_bounds = current_frame > cache_max;
                     let too_small_for_cache_bounds = current_frame < cache_min;
@@ -725,33 +873,55 @@ impl AVAssetReaderDecoder {
                                     *last_sent_frame.borrow_mut() = Some(data.clone());
                                     let _ = req.sender.send(data.to_decoded_frame());
                                 } else {
-                                    // IMPORTANT: When the decoder advances past a requested frame
-                                    // and that frame isn't cached, fall back to the nearest cached
-                                    // frame (backward preferred). This happens during parallel
-                                    // prefetch decoding when multiple GetFrame requests arrive
-                                    // concurrently — the decoder may process later frames first,
-                                    // advancing past earlier requests. Without a generous fallback,
-                                    // the oneshot sender is silently dropped (returning None to the
-                                    // prefetch pipeline), creating permanent gaps in the frame
-                                    // sequence that cause visible playback stalls and frame skips.
-                                    //
-                                    // Previously this was restricted to forward-only fallback
-                                    // within 1 frame (MAX_FORWARD_FALLBACK_DISTANCE=1), which was
-                                    // far too restrictive for 60fps playback of lower-fps
-                                    // recordings (e.g. 46fps) where frame number gaps are common.
-                                    const MAX_FALLBACK_DISTANCE: u32 = 90;
-
-                                    let nearest = cache
+                                    // Always answer. Prefer the newest frame at-or-before
+                                    // the request — from the cache, the hold candidate the
+                                    // seek re-vended, or the persistent gap hold — as the
+                                    // true VFR hold content (a pts gap means the frame
+                                    // stayed on screen). A later frame is the last resort;
+                                    // leaving the request unanswered would wedge the render
+                                    // loop.
+                                    let cached_before = cache
                                         .range(..=req.frame)
                                         .next_back()
-                                        .or_else(|| cache.range(req.frame..).next());
+                                        .map(|(_, c)| c.data().clone());
+                                    let hold_before = gap_hold.clone().filter(|h| {
+                                        pts_holes.get(&h.number).is_some_and(|&end| {
+                                            h.number <= req.frame && req.frame < end
+                                        })
+                                    });
+                                    let candidate_before = hold_candidate
+                                        .as_ref()
+                                        .filter(|(n, _)| *n <= req.frame)
+                                        .map(|(n, buf)| {
+                                            CachedFrame::new(&processor, buf.retained(), *n)
+                                                .data()
+                                                .clone()
+                                        });
+                                    let best_before =
+                                        [cached_before, hold_before, candidate_before]
+                                            .into_iter()
+                                            .flatten()
+                                            .max_by_key(|d| d.number);
 
-                                    if let Some((&frame_num, cached)) = nearest {
-                                        let distance = req.frame.abs_diff(frame_num);
-                                        if distance <= MAX_FALLBACK_DISTANCE {
-                                            let _ =
-                                                req.sender.send(cached.data().to_decoded_frame());
-                                        }
+                                    if let Some(data) = best_before {
+                                        gap_hold = Some(data.clone());
+                                        *last_sent_frame.borrow_mut() = Some(data.clone());
+                                        let _ = req.sender.send(data.to_decoded_frame());
+                                    } else if let Some((&frame_num, cached)) =
+                                        cache.range(req.frame..).next()
+                                    {
+                                        tracing::debug!(
+                                            req_frame = req.frame,
+                                            nearest_frame = frame_num,
+                                            "serving forward frame across pts gap"
+                                        );
+                                        let _ = req.sender.send(cached.data().to_decoded_frame());
+                                    } else {
+                                        tracing::warn!(
+                                            req_frame = req.frame,
+                                            current_frame,
+                                            "dropping overshot request: cache empty"
+                                        );
                                     }
                                 }
                             } else {
@@ -804,7 +974,20 @@ impl AVAssetReaderDecoder {
                     );
                 }
 
-                if !at_eof {
+                if near_end {
+                    tracing::debug!(
+                        decoder_idx = decoder_idx,
+                        requested_frame = requested_frame,
+                        requested_time = requested_time,
+                        was_reset = was_reset,
+                        cache_size = cache.len(),
+                        consecutive_empty = this.decoders[decoder_idx]
+                            .health
+                            .consecutive_empty_iterations,
+                        near_end = near_end,
+                        "Decoder reached video tail while using EOF tolerance"
+                    );
+                } else if !at_eof {
                     tracing::warn!(
                         decoder_idx = decoder_idx,
                         requested_frame = requested_frame,
@@ -856,48 +1039,57 @@ impl AVAssetReaderDecoder {
                     let data = cached.data().clone();
                     let _ = req.sender.send(data.to_decoded_frame());
                 } else {
-                    // See the matching comment in the decode-loop fallback above for full
-                    // context. Both sites must use the same generous fallback policy:
-                    // backward-preferred, distance up to 90 frames. Restricting to
-                    // forward-only within 1 frame silently drops senders for frames the
-                    // decoder skipped, producing None in the prefetch pipeline.
-                    const MAX_FALLBACK_DISTANCE: u32 = 90;
-                    const MAX_FALLBACK_DISTANCE_EOF: u32 = 300;
-                    const MAX_FALLBACK_DISTANCE_NEAR_END: u32 = 180;
-
                     let allow_relaxed_fallback = is_scrubbing
                         || near_video_end
                         || decoder_at_eof
                         || decoder_returned_no_frames;
 
-                    let fallback_distance = if decoder_at_eof || decoder_returned_no_frames {
-                        MAX_FALLBACK_DISTANCE_EOF
-                    } else if near_video_end {
-                        MAX_FALLBACK_DISTANCE_NEAR_END
+                    let fallback_distance = if allow_relaxed_fallback {
+                        req.max_fallback_distance.max(MAX_RELAXED_FALLBACK_DISTANCE)
                     } else {
-                        MAX_FALLBACK_DISTANCE
+                        req.max_fallback_distance
                     };
 
-                    let nearest = cache
+                    // Always answer with the newest frame at-or-before the request —
+                    // from the cache, the hold candidate a seek re-vended, or the
+                    // persistent gap hold — as the true VFR hold content. A later frame
+                    // is the best remaining answer; dropping the request instead
+                    // starves the render loop and wedges gap playback/export.
+                    let cached_before = cache
                         .range(..=req.frame)
                         .next_back()
-                        .or_else(|| cache.range(req.frame..).next());
+                        .map(|(_, c)| c.data().clone());
+                    let hold_before = gap_hold.clone().filter(|h| {
+                        pts_holes
+                            .get(&h.number)
+                            .is_some_and(|&end| h.number <= req.frame && req.frame < end)
+                    });
+                    let candidate_before = hold_candidate
+                        .as_ref()
+                        .filter(|(n, _)| *n <= req.frame)
+                        .map(|(n, buf)| {
+                            CachedFrame::new(&processor, buf.retained(), *n)
+                                .data()
+                                .clone()
+                        });
+                    let best_before = [cached_before, hold_before, candidate_before]
+                        .into_iter()
+                        .flatten()
+                        .max_by_key(|d| d.number);
 
-                    if let Some((&frame_num, cached)) = nearest {
-                        let distance = req.frame.abs_diff(frame_num);
-                        if distance <= fallback_distance {
-                            let _ = req.sender.send(cached.data().to_decoded_frame());
-                        } else if allow_relaxed_fallback
-                            && let Some(ref last) = *last_sent_frame.borrow()
-                        {
-                            let _ = req.sender.send(last.to_decoded_frame());
-                        } else if allow_relaxed_fallback
-                            && let Some(ref first) = *first_ever_frame.borrow()
-                        {
-                            let _ = req.sender.send(first.to_decoded_frame());
-                        } else {
-                            unfulfilled_count += 1;
+                    if let Some(data) = best_before {
+                        gap_hold = Some(data.clone());
+                        *last_sent_frame.borrow_mut() = Some(data.clone());
+                        let _ = req.sender.send(data.to_decoded_frame());
+                    } else if let Some((&frame_num, cached)) = cache.range(req.frame..).next() {
+                        if req.frame.abs_diff(frame_num) > fallback_distance {
+                            tracing::debug!(
+                                req_frame = req.frame,
+                                nearest_frame = frame_num,
+                                "serving forward frame across pts gap"
+                            );
                         }
+                        let _ = req.sender.send(cached.data().to_decoded_frame());
                     } else if allow_relaxed_fallback
                         && let Some(ref last) = *last_sent_frame.borrow()
                     {

@@ -1,6 +1,12 @@
 import os from "node:os";
-import type { Subprocess } from "bun";
+import {
+	getContainerCpuLimit,
+	getContainerCpuUsageMicros,
+} from "./container-cpu";
+import { getContainerMemoryMetrics } from "./container-memory";
+import type { MediaOperationHandle } from "./media-operations";
 import type { TempFileHandle } from "./temp-files";
+import { getActiveDirectVideoProcessCount } from "./video-capacity";
 
 export type JobPhase =
 	| "queued"
@@ -51,33 +57,19 @@ export interface Job {
 	updatedAt: number;
 	inputTempFile?: TempFileHandle;
 	outputTempFile?: TempFileHandle;
-	process?: Subprocess;
+	mediaOperation?: MediaOperationHandle;
 	webhookUrl?: string;
+	webhookSecret?: string;
 	abortController?: AbortController;
 }
 
 const jobs = new Map<string, Job>();
 const JOB_TTL_MS = 60 * 60 * 1000;
 const STALE_JOB_MS = 15 * 60 * 1000;
-const MAX_JOB_LIFETIME_MS = 45 * 60 * 1000;
-
-// Dynamic concurrency control for video processing.
-//
-// Instead of a manual counter (which drifted and caused permanent "server busy"
-// errors), active process count is derived from actual job state in the map.
-//
-// Concurrency limit is determined by:
-//   1. MEDIA_SERVER_MAX_CONCURRENT_VIDEO_PROCESSES env var (if set, used as ceiling)
-//   2. Otherwise: floor(cpuCount / 2), minimum 1
-//   3. Dynamically reduced when CPU load or process memory is high
-//
-// CPU throttling: when 1-minute load average per core exceeds 0.8,
-// effective max is scaled down proportionally.
-//
-// Memory throttling (opt-in): set MEDIA_SERVER_MEMORY_LIMIT_MB to the container's
-// memory limit. When process RSS exceeds 85% of that limit, effective max is reduced.
-// Uses process-level RSS (not system-wide free memory) so it works correctly on
-// shared hosts where os.freemem() reflects other tenants.
+const MAX_JOB_LIFETIME_MS = 60 * 60 * 1000;
+const WEBHOOK_MAX_ATTEMPTS = 3;
+const WEBHOOK_RETRY_BASE_MS = 500;
+const WEBHOOK_TIMEOUT_MS = 5000;
 
 const configuredMaxProcesses =
 	Number.parseInt(
@@ -85,17 +77,57 @@ const configuredMaxProcesses =
 		10,
 	) || 0;
 
-const cpuCount = os.cpus().length;
+const hostCpuCount = os.cpus().length;
 
 const CPU_LOAD_THRESHOLD = 0.8;
-const PROCESS_RSS_LIMIT_MB =
-	Number.parseInt(process.env.MEDIA_SERVER_MEMORY_LIMIT_MB ?? "0", 10) || 0;
+const CPU_REJECT_THRESHOLD = 0.95;
+const DEFAULT_MAX_CONCURRENT_VIDEO_PROCESSES = 4;
+const MEMORY_THROTTLE_THRESHOLD = 0.85;
+const MEMORY_REJECT_THRESHOLD = 0.9;
+const VIDEO_PROCESS_MEMORY_BUDGET_MB = 768;
+const CPU_SAMPLE_MIN_INTERVAL_MS = 250;
+
+let previousContainerCpuUsageMicros = 0;
+let previousContainerCpuSampleAt = 0;
+let containerCpuPressure = 0;
+
+function getCpuCapacity(): number {
+	return getContainerCpuLimit() || hostCpuCount;
+}
+
+function getCpuPressure(cpuCapacity: number, loadAvg1m: number): number {
+	const usageMicros = getContainerCpuUsageMicros();
+	const now = performance.now();
+
+	if (usageMicros > 0) {
+		if (
+			previousContainerCpuUsageMicros > 0 &&
+			now - previousContainerCpuSampleAt >= CPU_SAMPLE_MIN_INTERVAL_MS
+		) {
+			const elapsedSeconds = (now - previousContainerCpuSampleAt) / 1000;
+			const usedCpuSeconds =
+				(usageMicros - previousContainerCpuUsageMicros) / 1_000_000;
+			containerCpuPressure =
+				usedCpuSeconds >= 0
+					? Math.max(0, usedCpuSeconds / elapsedSeconds / cpuCapacity)
+					: 0;
+			previousContainerCpuUsageMicros = usageMicros;
+			previousContainerCpuSampleAt = now;
+		} else if (previousContainerCpuUsageMicros === 0) {
+			previousContainerCpuUsageMicros = usageMicros;
+			previousContainerCpuSampleAt = now;
+		}
+
+		return containerCpuPressure;
+	}
+
+	return loadAvg1m / cpuCapacity;
+}
 
 function isActivePhase(phase: JobPhase): boolean {
 	return phase !== "complete" && phase !== "error" && phase !== "cancelled";
 }
 
-// Derived from actual job state — no manual increment/decrement that can drift
 export function getActiveVideoProcessCount(): number {
 	let count = 0;
 	for (const job of jobs.values()) {
@@ -103,23 +135,45 @@ export function getActiveVideoProcessCount(): number {
 			count++;
 		}
 	}
-	return count;
+	return count + getActiveDirectVideoProcessCount();
 }
 
 export function getMaxConcurrentVideoProcesses(): number {
 	if (configuredMaxProcesses > 0) {
 		return configuredMaxProcesses;
 	}
-	return Math.max(1, Math.floor(cpuCount / 2));
+	const containerMemoryLimitMB = getContainerMemoryMetrics().limitMB;
+	const memoryBoundMax =
+		containerMemoryLimitMB > 0
+			? Math.max(
+					1,
+					Math.floor(
+						(containerMemoryLimitMB * MEMORY_THROTTLE_THRESHOLD) /
+							VIDEO_PROCESS_MEMORY_BUDGET_MB,
+					),
+				)
+			: DEFAULT_MAX_CONCURRENT_VIDEO_PROCESSES;
+	return Math.max(
+		1,
+		Math.min(
+			DEFAULT_MAX_CONCURRENT_VIDEO_PROCESSES,
+			Math.floor(getCpuCapacity() / 2),
+			memoryBoundMax,
+		),
+	);
 }
 
 export interface SystemResources {
 	cpuCount: number;
+	hostCpuCount: number;
 	loadAvg1m: number;
 	cpuPressure: number;
 	processRssMB: number;
 	processHeapMB: number;
 	processRssLimitMB: number;
+	containerMemoryUsageMB: number;
+	containerMemoryLimitMB: number;
+	memoryPressure: number;
 	configuredMax: number;
 	effectiveMax: number;
 	throttleReason: string | null;
@@ -127,43 +181,61 @@ export interface SystemResources {
 
 export function getSystemResources(): SystemResources {
 	const loadAvg1m = os.loadavg()[0];
-	const cpuPressure = loadAvg1m / cpuCount;
+	const cpuCount = getCpuCapacity();
+	const cpuPressure = getCpuPressure(cpuCount, loadAvg1m);
 	const mem = process.memoryUsage();
 	const processRssMB = Math.round(mem.rss / (1024 * 1024));
 	const processHeapMB = Math.round(mem.heapUsed / (1024 * 1024));
+	const containerMemory = getContainerMemoryMetrics();
+	const memoryUsageMB = containerMemory.usageMB || processRssMB;
+	const memoryLimitMB = containerMemory.limitMB;
+	const memoryPressure = memoryLimitMB > 0 ? memoryUsageMB / memoryLimitMB : 0;
 	const max = getMaxConcurrentVideoProcesses();
 
 	let effectiveMax = max;
 	let throttleReason: string | null = null;
 
 	if (cpuPressure > CPU_LOAD_THRESHOLD) {
-		effectiveMax = Math.max(
-			1,
-			Math.floor(max * (1 - (cpuPressure - CPU_LOAD_THRESHOLD))),
-		);
-		throttleReason = `CPU load ${cpuPressure.toFixed(2)} exceeds ${CPU_LOAD_THRESHOLD} threshold`;
+		effectiveMax =
+			cpuPressure >= CPU_REJECT_THRESHOLD
+				? 0
+				: Math.max(
+						1,
+						Math.floor(max * (1 - (cpuPressure - CPU_LOAD_THRESHOLD))),
+					);
+		throttleReason = `CPU utilization ${cpuPressure.toFixed(2)} exceeds ${CPU_LOAD_THRESHOLD} threshold`;
 	}
 
-	if (PROCESS_RSS_LIMIT_MB > 0 && processRssMB > PROCESS_RSS_LIMIT_MB * 0.85) {
-		const memPressure = processRssMB / PROCESS_RSS_LIMIT_MB;
-		const memMax = Math.max(1, Math.floor(max * (1 - memPressure)));
+	if (memoryPressure > MEMORY_THROTTLE_THRESHOLD) {
+		const memMax =
+			memoryPressure >= MEMORY_REJECT_THRESHOLD
+				? 0
+				: Math.max(1, Math.floor(max * (1 - memoryPressure)));
 		if (memMax < effectiveMax) {
 			effectiveMax = memMax;
-			throttleReason = `Process RSS ${processRssMB}MB exceeds 85% of ${PROCESS_RSS_LIMIT_MB}MB limit`;
+			throttleReason = `Container memory ${memoryUsageMB}MB exceeds ${Math.round(MEMORY_THROTTLE_THRESHOLD * 100)}% of ${memoryLimitMB}MB limit`;
 		}
 	}
 
 	return {
 		cpuCount,
+		hostCpuCount,
 		loadAvg1m,
 		cpuPressure,
 		processRssMB,
 		processHeapMB,
-		processRssLimitMB: PROCESS_RSS_LIMIT_MB,
+		processRssLimitMB: memoryLimitMB,
+		containerMemoryUsageMB: containerMemory.usageMB,
+		containerMemoryLimitMB: containerMemory.limitMB,
+		memoryPressure,
 		configuredMax: configuredMaxProcesses,
 		effectiveMax,
 		throttleReason,
 	};
+}
+
+export function hasCriticalMemoryPressure(): boolean {
+	return getSystemResources().memoryPressure >= MEMORY_REJECT_THRESHOLD;
 }
 
 export function canAcceptNewVideoProcess(): boolean {
@@ -181,6 +253,7 @@ export function createJob(
 	videoId: string,
 	userId: string,
 	webhookUrl?: string,
+	webhookSecret?: string,
 ): Job {
 	const now = Date.now();
 	const job: Job = {
@@ -192,6 +265,7 @@ export function createJob(
 		createdAt: now,
 		updatedAt: now,
 		webhookUrl,
+		webhookSecret,
 	};
 	jobs.set(jobId, job);
 	return job;
@@ -214,7 +288,7 @@ export function updateJob(
 			| "outputUrl"
 			| "inputTempFile"
 			| "outputTempFile"
-			| "process"
+			| "mediaOperation"
 			| "abortController"
 		>
 	>,
@@ -226,23 +300,27 @@ export function updateJob(
 	return job;
 }
 
+export function touchJob(jobId: string): Job | undefined {
+	const job = jobs.get(jobId);
+	if (!job) return undefined;
+
+	job.updatedAt = Date.now();
+	return job;
+}
+
 export function deleteJob(jobId: string): boolean {
 	const job = jobs.get(jobId);
 	if (job) {
 		job.abortController?.abort();
 		job.inputTempFile?.cleanup().catch(() => {});
 		job.outputTempFile?.cleanup().catch(() => {});
-		if (job.process) {
-			try {
-				job.process.kill();
-			} catch {}
-		}
+		void job.mediaOperation?.cancel();
 	}
 	return jobs.delete(jobId);
 }
 
-export function abortAllJobs(): number {
-	let aborted = 0;
+export async function abortAllJobs(): Promise<number> {
+	const abortedJobs: Job[] = [];
 
 	for (const job of jobs.values()) {
 		if (
@@ -254,11 +332,13 @@ export function abortAllJobs(): number {
 			job.phase = "cancelled";
 			job.message = "Server shutting down";
 			job.updatedAt = Date.now();
-			aborted++;
+			abortedJobs.push(job);
 		}
 	}
 
-	return aborted;
+	await Promise.allSettled(abortedJobs.map((job) => sendWebhook(job)));
+
+	return abortedJobs.length;
 }
 
 export function getAllJobs(): Job[] {
@@ -279,6 +359,11 @@ export function cleanupExpiredJobs(): number {
 					`[job-manager] Cleaning up expired job ${jobId} (phase=${job.phase}, age=${Math.round(age / 60000)}m)`,
 				);
 				job.abortController?.abort();
+				job.phase = "error";
+				job.error = `Job expired: no progress update for ${Math.round(staleness / 60000)} minutes`;
+				job.message = "Processing failed (expired)";
+				job.updatedAt = now;
+				void sendWebhook(job);
 			}
 			deleteJob(jobId);
 			cleaned++;
@@ -294,6 +379,7 @@ export function cleanupExpiredJobs(): number {
 			job.error = `Job stale: no progress update for ${Math.round(staleness / 60000)} minutes`;
 			job.message = "Processing failed (stale)";
 			job.updatedAt = now;
+			void sendWebhook(job);
 			cleaned++;
 			continue;
 		}
@@ -307,6 +393,7 @@ export function cleanupExpiredJobs(): number {
 			job.error = `Job exceeded maximum lifetime of ${Math.round(MAX_JOB_LIFETIME_MS / 60000)} minutes`;
 			job.message = "Processing failed (timeout)";
 			job.updatedAt = now;
+			void sendWebhook(job);
 			cleaned++;
 		}
 	}
@@ -331,19 +418,46 @@ export async function sendWebhook(job: Job): Promise<void> {
 	if (!job.webhookUrl) return;
 
 	const payload = getJobProgress(job);
-
-	try {
-		await fetch(job.webhookUrl, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(payload),
-		});
-	} catch (err) {
-		console.error(
-			`[job-manager] Failed to send webhook for job ${job.jobId}:`,
-			err,
-		);
+	const headers: Record<string, string> = {
+		"Content-Type": "application/json",
+	};
+	if (job.webhookSecret) {
+		headers["x-media-server-secret"] = job.webhookSecret;
 	}
+
+	let lastError: unknown;
+
+	for (let attempt = 0; attempt < WEBHOOK_MAX_ATTEMPTS; attempt++) {
+		try {
+			const resp = await fetch(job.webhookUrl, {
+				method: "POST",
+				headers,
+				body: JSON.stringify(payload),
+				signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+			});
+
+			if (resp.ok) {
+				return;
+			}
+
+			lastError = new Error(
+				`Webhook returned ${resp.status} for job ${job.jobId}`,
+			);
+		} catch (err) {
+			lastError = err;
+		}
+
+		if (attempt < WEBHOOK_MAX_ATTEMPTS - 1) {
+			await new Promise((resolve) =>
+				setTimeout(resolve, WEBHOOK_RETRY_BASE_MS * 2 ** attempt),
+			);
+		}
+	}
+
+	console.error(
+		`[job-manager] Failed to send webhook for job ${job.jobId}:`,
+		lastError,
+	);
 }
 
 export function forceCleanupActiveJobs(): number {
@@ -360,6 +474,7 @@ export function forceCleanupActiveJobs(): number {
 			job.error = "Force-cleaned by admin";
 			job.message = "Processing failed (force-cleaned)";
 			job.updatedAt = now;
+			void sendWebhook(job);
 			cleaned++;
 		}
 	}

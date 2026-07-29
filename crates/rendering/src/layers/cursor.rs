@@ -17,13 +17,18 @@ const CLICK_SHRINK_SIZE: f32 = 0.8;
 const CURSOR_IDLE_MIN_DELAY_MS: f64 = 500.0;
 const CURSOR_IDLE_FADE_OUT_MS: f64 = 400.0;
 const CURSOR_IDLE_RESUME_LOOKAHEAD_MS: f64 = 250.0;
-const CURSOR_VECTOR_CAP: f32 = 320.0;
-const CURSOR_MIN_MOTION_NORMALIZED: f32 = 0.01;
-const CURSOR_MIN_MOTION_PX: f32 = 1.0;
+/// Smear length ceiling in output px. Screen Studio semantics: the smear
+/// length equals the cursor's per-frame travel scaled by the user amount —
+/// linear, with no response curve — so this only bounds pathological
+/// single-frame teleports, not real flicks (spring motion peaks well below
+/// it at 60fps).
+const CURSOR_VECTOR_CAP: f32 = 480.0;
 const CURSOR_BASELINE_FPS: f32 = 60.0;
 const CURSOR_MULTIPLIER: f32 = 1.0;
-const CURSOR_MAX_STRENGTH: f32 = 2.0;
-const VELOCITY_BLEND_RATIO: f32 = 0.7;
+/// Upper bound on amount * (fps/60). Generous: it must not clip the fps
+/// normalization at high frame rates (120fps needs 2x to keep the real-time
+/// shutter constant).
+const CURSOR_MAX_STRENGTH: f32 = 4.0;
 
 /// The size to render the svg to.
 static SVG_CURSOR_RASTERIZED_HEIGHT: u32 = 200;
@@ -37,6 +42,7 @@ pub struct CursorLayer {
     circle_cursor: Option<CursorTexture>,
     prev_is_svg_assets_enabled: Option<bool>,
     prev_cursor_type: Option<CursorType>,
+    cursor_assets_preloaded: bool,
 }
 
 struct Statics {
@@ -196,6 +202,7 @@ impl CursorLayer {
             circle_cursor: None,
             prev_is_svg_assets_enabled: None,
             prev_cursor_type: None,
+            cursor_assets_preloaded: false,
         }
     }
 
@@ -204,11 +211,12 @@ impl CursorLayer {
         let mut rgba = vec![0u8; (size * size * 4) as usize];
         let center = size as f32 / 2.0;
         let outer_radius = center - size as f32 * 0.08;
-        let border_width = size as f32 * 0.025;
-        let edge_softness = size as f32 * 0.015;
+        let dark_ring_width = size as f32 * 0.014;
+        let light_ring_width = size as f32 * 0.016;
+        let shadow_spread = size as f32 * 0.035;
+        let edge_softness = size as f32 * 0.018;
 
-        let fill_alpha = 0.2_f32;
-        let border_alpha = 0.55_f32;
+        let inner_edge = outer_radius - dark_ring_width - light_ring_width;
 
         for y in 0..size {
             for x in 0..size {
@@ -217,29 +225,132 @@ impl CursorLayer {
                 let dist = (dx * dx + dy * dy).sqrt();
                 let idx = ((y * size + x) * 4) as usize;
 
+                if dist > outer_radius + shadow_spread {
+                    continue;
+                }
+
+                let mut color = [0.0_f32; 4];
+
+                if dist > outer_radius {
+                    let shadow_t = ((dist - outer_radius) / shadow_spread).clamp(0.0, 1.0);
+                    let shadow_alpha = 0.16 * (1.0 - shadow_t * shadow_t);
+                    composite_cursor_layer(&mut color, [0.0, 0.0, 0.0, shadow_alpha]);
+                }
+
                 if dist <= outer_radius + edge_softness {
-                    let outer_fade = 1.0 - ((dist - outer_radius) / edge_softness).clamp(0.0, 1.0);
+                    let outer_fade = 1.0
+                        - ((dist - outer_radius) / edge_softness)
+                            .clamp(0.0, 1.0)
+                            .powf(1.2);
 
-                    let border_start = outer_radius - border_width;
-                    let border_factor = if dist >= border_start {
-                        ((dist - border_start) / border_width).clamp(0.0, 1.0)
+                    if dist > outer_radius - dark_ring_width {
+                        let ring_alpha = 0.38 * outer_fade;
+                        composite_cursor_layer(&mut color, [0.0, 0.0, 0.0, ring_alpha]);
+                    } else if dist > inner_edge {
+                        let ring_alpha = 0.42 * outer_fade;
+                        composite_cursor_layer(&mut color, [1.0, 1.0, 1.0, ring_alpha]);
                     } else {
-                        0.0
-                    };
+                        let fill_alpha = 0.14 * outer_fade;
+                        composite_cursor_layer(&mut color, [1.0, 1.0, 1.0, fill_alpha]);
+                    }
+                }
 
-                    let base_alpha = fill_alpha + border_factor * (border_alpha - fill_alpha);
-                    let alpha = base_alpha * outer_fade;
-
-                    let premul = (255.0 * alpha) as u8;
-                    rgba[idx] = premul;
-                    rgba[idx + 1] = premul;
-                    rgba[idx + 2] = premul;
-                    rgba[idx + 3] = premul;
+                if color[3] > 0.0 {
+                    let a = color[3];
+                    rgba[idx] = (color[0] * a * 255.0).round() as u8;
+                    rgba[idx + 1] = (color[1] * a * 255.0).round() as u8;
+                    rgba[idx + 2] = (color[2] * a * 255.0).round() as u8;
+                    rgba[idx + 3] = (a * 255.0).round() as u8;
                 }
             }
         }
 
         CursorTexture::prepare(constants, &rgba, (size, size), XY::new(0.5, 0.5))
+    }
+
+    fn load_cursor_texture(
+        constants: &RenderVideoConstants,
+        cursor_id: &str,
+        use_svg: bool,
+    ) -> Option<CursorTexture> {
+        let mut loaded_cursor = None;
+
+        let cursor_shape = match &constants.recording_meta.inner {
+            RecordingMetaInner::Studio(studio) => match studio.as_ref() {
+                StudioRecordingMeta::MultipleSegments {
+                    inner:
+                        MultipleSegments {
+                            cursors: Cursors::Correct(cursors),
+                            ..
+                        },
+                } => cursors.get(cursor_id).and_then(|v| v.shape),
+                _ => None,
+            },
+            _ => None,
+        };
+
+        if let Some(cursor_shape) = cursor_shape
+            && use_svg
+            && let Some(info) = cursor_shape.resolve()
+        {
+            loaded_cursor = CursorTexture::prepare_svg(constants, info.raw, info.hotspot.into())
+                .map_err(|err| error!("Error loading SVG cursor {cursor_id:?}: {err}"))
+                .ok();
+        }
+
+        if let StudioRecordingMeta::MultipleSegments { inner, .. } = &constants.meta
+            && loaded_cursor.is_none()
+            && let Some(c) = inner.get_cursor_image(&constants.recording_meta, cursor_id)
+            && let Ok(img) = image::open(&c.path)
+                .map_err(|err| error!("Failed to load cursor image from {:?}: {err}", c.path))
+        {
+            loaded_cursor = Some(CursorTexture::prepare(
+                constants,
+                &img.to_rgba8(),
+                img.dimensions(),
+                c.hotspot,
+            ));
+        }
+
+        loaded_cursor
+    }
+
+    fn preload_cursor_textures(&mut self, constants: &RenderVideoConstants, use_svg: bool) {
+        let StudioRecordingMeta::MultipleSegments { inner, .. } = &constants.meta else {
+            return;
+        };
+
+        let Cursors::Correct(cursors) = &inner.cursors else {
+            return;
+        };
+
+        for cursor_id in cursors.keys() {
+            if !self.cursors.contains_key(cursor_id)
+                && let Some(texture) = Self::load_cursor_texture(constants, cursor_id, use_svg)
+            {
+                self.cursors.insert(cursor_id.clone(), texture);
+            }
+        }
+    }
+
+    pub(crate) fn preload_assets(
+        &mut self,
+        constants: &RenderVideoConstants,
+        use_svg: bool,
+        cursor_type: &CursorType,
+    ) {
+        self.prev_cursor_type = Some(cursor_type.clone());
+
+        if cursor_type == &CursorType::Circle {
+            if self.circle_cursor.is_none() {
+                self.circle_cursor = Some(Self::create_circle_cursor(constants));
+            }
+            return;
+        }
+
+        self.prev_is_svg_assets_enabled = Some(use_svg);
+        self.preload_cursor_textures(constants, use_svg);
+        self.cursor_assets_preloaded = true;
     }
 
     pub fn prepare(
@@ -262,63 +373,49 @@ impl CursorLayer {
             return;
         };
 
+        // Out-of-band positions (cursor in a cropped-away region, spring
+        // overshoot past a display edge) still render: the shader's
+        // screen_bounds clip confines the sprite to the display card, so it
+        // slides off the card edge and back instead of popping in and out.
+        // Only non-finite data hides it outright.
         let cursor_uv = &interpolated_cursor.position.coord;
-        if !(0.0..=1.0).contains(&cursor_uv.x) || !(0.0..=1.0).contains(&cursor_uv.y) {
+        if !cursor_uv.x.is_finite() || !cursor_uv.y.is_finite() {
             self.bind_group = None;
             return;
         }
 
         let fps = uniforms.frame_rate.max(1) as f32;
         let screen_size = constants.options.screen_size;
-        let screen_diag =
-            (((screen_size.x as f32).powi(2) + (screen_size.y as f32).powi(2)).sqrt()).max(1.0);
         let fps_scale = fps / CURSOR_BASELINE_FPS;
         let cursor_strength = (uniforms.motion_blur_amount * CURSOR_MULTIPLIER * fps_scale)
             .clamp(0.0, CURSOR_MAX_STRENGTH);
-        let parent_motion = uniforms.display_parent_motion_px;
-        let child_motion = {
-            let delta_motion = uniforms
-                .prev_cursor
-                .as_ref()
-                .filter(|prev| prev.cursor_id == interpolated_cursor.cursor_id)
-                .map(|prev| {
-                    let delta_uv = XY::new(
-                        (interpolated_cursor.position.coord.x - prev.position.coord.x) as f32,
-                        (interpolated_cursor.position.coord.y - prev.position.coord.y) as f32,
-                    );
-                    XY::new(
-                        delta_uv.x * screen_size.x as f32,
-                        delta_uv.y * screen_size.y as f32,
-                    )
-                })
-                .unwrap_or_else(|| XY::new(0.0, 0.0));
-
-            let spring_velocity = XY::new(
-                interpolated_cursor.velocity.x * screen_size.x as f32 / fps,
-                interpolated_cursor.velocity.y * screen_size.y as f32 / fps,
-            );
-
-            XY::new(
-                delta_motion.x * (1.0 - VELOCITY_BLEND_RATIO)
-                    + spring_velocity.x * VELOCITY_BLEND_RATIO,
-                delta_motion.y * (1.0 - VELOCITY_BLEND_RATIO)
-                    + spring_velocity.y * VELOCITY_BLEND_RATIO,
-            )
-        };
+        let child_motion = uniforms
+            .prev_cursor
+            .as_ref()
+            .filter(|prev| prev.cursor_id == interpolated_cursor.cursor_id)
+            .map(|prev| {
+                let delta_uv = XY::new(
+                    (interpolated_cursor.position.coord.x - prev.position.coord.x) as f32,
+                    (interpolated_cursor.position.coord.y - prev.position.coord.y) as f32,
+                );
+                XY::new(
+                    delta_uv.x * screen_size.x as f32,
+                    delta_uv.y * screen_size.y as f32,
+                )
+            })
+            .unwrap_or_else(|| XY::new(0.0, 0.0));
 
         let combined_motion_px = if cursor_strength <= f32::EPSILON {
             XY::new(0.0, 0.0)
         } else {
-            combine_cursor_motion(parent_motion, child_motion)
+            child_motion
         };
 
-        let normalized_motion = ((combined_motion_px.x / screen_diag).powi(2)
-            + (combined_motion_px.y / screen_diag).powi(2))
-        .sqrt();
-        let has_motion =
-            normalized_motion > CURSOR_MIN_MOTION_NORMALIZED && cursor_strength > f32::EPSILON;
-        let scaled_motion = if has_motion {
-            clamp_cursor_vector(combined_motion_px * cursor_strength)
+        // Screen Studio semantics: smear length = per-frame travel x amount,
+        // linear all the way down (a sub-pixel kernel is the identity, so no
+        // response ramp is needed to avoid popping).
+        let scaled_motion = if cursor_strength > f32::EPSILON {
+            cursor_blur_vector(combined_motion_px, cursor_strength)
         } else {
             XY::new(0.0, 0.0)
         };
@@ -351,6 +448,7 @@ impl CursorLayer {
         if self.prev_is_svg_assets_enabled != Some(uniforms.project.cursor.use_svg) {
             self.prev_is_svg_assets_enabled = Some(uniforms.project.cursor.use_svg);
             self.cursors.drain();
+            self.cursor_assets_preloaded = false;
         }
 
         let cursor_texture = if cursor_type == CursorType::Circle {
@@ -359,60 +457,19 @@ impl CursorLayer {
             }
             self.circle_cursor.as_ref().unwrap()
         } else {
-            if !self.cursors.contains_key(&interpolated_cursor.cursor_id) {
-                let mut loaded_cursor = None;
-
-                let cursor_shape = match &constants.recording_meta.inner {
-                    RecordingMetaInner::Studio(studio) => match studio.as_ref() {
-                        StudioRecordingMeta::MultipleSegments {
-                            inner:
-                                MultipleSegments {
-                                    cursors: Cursors::Correct(cursors),
-                                    ..
-                                },
-                        } => cursors
-                            .get(&interpolated_cursor.cursor_id)
-                            .and_then(|v| v.shape),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-
-                if let Some(cursor_shape) = cursor_shape
-                    && uniforms.project.cursor.use_svg
-                    && let Some(info) = cursor_shape.resolve()
-                {
-                    loaded_cursor =
-                        CursorTexture::prepare_svg(constants, info.raw, info.hotspot.into())
-                            .map_err(|err| {
-                                error!(
-                                    "Error loading SVG cursor {:?}: {err}",
-                                    interpolated_cursor.cursor_id
-                                )
-                            })
-                            .ok();
-                }
-
-                if let StudioRecordingMeta::MultipleSegments { inner, .. } = &constants.meta
-                    && loaded_cursor.is_none()
-                    && let Some(c) = inner
-                        .get_cursor_image(&constants.recording_meta, &interpolated_cursor.cursor_id)
-                    && let Ok(img) = image::open(&c.path).map_err(|err| {
-                        error!("Failed to load cursor image from {:?}: {err}", c.path)
-                    })
-                {
-                    loaded_cursor = Some(CursorTexture::prepare(
-                        constants,
-                        &img.to_rgba8(),
-                        img.dimensions(),
-                        c.hotspot,
-                    ));
-                }
-
-                if let Some(c) = loaded_cursor {
-                    self.cursors
-                        .insert(interpolated_cursor.cursor_id.clone(), c);
-                }
+            if !self.cursor_assets_preloaded {
+                self.preload_cursor_textures(constants, uniforms.project.cursor.use_svg);
+                self.cursor_assets_preloaded = true;
+            }
+            if !self.cursors.contains_key(&interpolated_cursor.cursor_id)
+                && let Some(texture) = Self::load_cursor_texture(
+                    constants,
+                    &interpolated_cursor.cursor_id,
+                    uniforms.project.cursor.use_svg,
+                )
+            {
+                self.cursors
+                    .insert(interpolated_cursor.cursor_id.clone(), texture);
             }
             let Some(tex) = self.cursors.get(&interpolated_cursor.cursor_id) else {
                 error!("Cursor {:?} not found!", interpolated_cursor.cursor_id);
@@ -422,21 +479,21 @@ impl CursorLayer {
         };
 
         let size = {
-            let base_size_px = STANDARD_CURSOR_HEIGHT / constants.options.screen_size.y as f32
-                * uniforms.output_size.1 as f32;
-
-            let cursor_size_factor = if uniforms.cursor_size <= 0.0 {
-                100.0
-            } else {
-                uniforms.cursor_size / 100.0
-            };
-
-            // 0 -> 1 indicating how much to shrink from click
             let click_t = get_click_t(&cursor.clicks, (time_s as f64) * 1000.0);
-            // lerp shrink size
             let click_scale_factor = click_t * 1.0 + (1.0 - click_t) * CLICK_SHRINK_SIZE;
-
-            let size = base_size_px * cursor_size_factor * click_scale_factor;
+            let crop = ProjectUniforms::get_crop(&constants.options, &uniforms.project);
+            let display_size = ProjectUniforms::display_size(
+                &constants.options,
+                &uniforms.project,
+                resolution_base,
+            );
+            let size = cursor_height_px(
+                constants.options.screen_size.y as f32,
+                crop.size.y as f32,
+                display_size.y as f32,
+                uniforms.cursor_size,
+                click_scale_factor,
+            );
 
             let texture_size_aspect = {
                 let texture_size = cursor_texture.texture.size();
@@ -478,15 +535,67 @@ impl CursorLayer {
             zoom,
         ) - zoomed_position;
 
-        let effective_strength = if has_motion { cursor_strength } else { 0.0 };
+        // In split-screen the screen only occupies a half-rect, so remap the
+        // cursor from its raw source UV into that pane (matching the display
+        // layer's split crop -> half-rect mapping) and scale the sprite by the
+        // same factor. The cursor shader's screen_bounds clip already follows
+        // uniforms.display.target_bounds (the morphing half), so a cursor that
+        // lands outside the visible crop is confined automatically.
+        let position_size = match &uniforms.split {
+            Some(split) if split.factor > 0.001 => {
+                let screen_size = constants.options.screen_size;
+                let crop = ProjectUniforms::get_crop(&constants.options, &uniforms.project);
+                let display_size = ProjectUniforms::display_size(
+                    &constants.options,
+                    &uniforms.project,
+                    resolution_base,
+                );
 
-        let cursor_uniforms = CursorUniforms {
-            position_size: [
+                let scrop = split.screen.crop;
+                let starget = split.screen.target;
+                let crop_w = (scrop[2] - scrop[0]).max(f32::EPSILON);
+                let crop_h = (scrop[3] - scrop[1]).max(f32::EPSILON);
+                let target_w = starget[2] - starget[0];
+                let target_h = starget[3] - starget[1];
+
+                let cursor_px = [
+                    cursor_uv.x as f32 * screen_size.x as f32,
+                    cursor_uv.y as f32 * screen_size.y as f32,
+                ];
+                let tip = [
+                    starget[0] + (cursor_px[0] - scrop[0]) / crop_w * target_w,
+                    starget[1] + (cursor_px[1] - scrop[1]) / crop_h * target_h,
+                ];
+
+                // Source->pane scale (uniform; the split crop matches the pane
+                // aspect) relative to the normal source->frame scale.
+                let normal_scale = display_size.x as f32 / (crop.size.x as f32).max(f32::EPSILON);
+                let size_factor = (target_w / crop_w) / normal_scale.max(f32::EPSILON);
+
+                let split_pos = [
+                    tip[0] - hotspot.x as f32 * size_factor,
+                    tip[1] - hotspot.y as f32 * size_factor,
+                ];
+                let split_size = [size.x as f32 * size_factor, size.y as f32 * size_factor];
+
+                let t = split.factor as f32;
+                [
+                    crate::lerp_f32(zoomed_position.x as f32, split_pos[0], t),
+                    crate::lerp_f32(zoomed_position.y as f32, split_pos[1], t),
+                    crate::lerp_f32(zoomed_size.x as f32, split_size[0], t),
+                    crate::lerp_f32(zoomed_size.y as f32, split_size[1], t),
+                ]
+            }
+            _ => [
                 zoomed_position.x as f32,
                 zoomed_position.y as f32,
                 zoomed_size.x as f32,
                 zoomed_size.y as f32,
             ],
+        };
+
+        let cursor_uniforms = CursorUniforms {
+            position_size,
             output_size: [
                 uniforms.output_size.0 as f32,
                 uniforms.output_size.1 as f32,
@@ -497,7 +606,13 @@ impl CursorLayer {
             motion_vector_strength: [
                 scaled_motion.x,
                 scaled_motion.y,
-                effective_strength,
+                // Pure on/off gate: the amount is baked into the smear
+                // length (scaled_motion), never an opacity mix.
+                if cursor_strength > f32::EPSILON {
+                    1.0
+                } else {
+                    0.0
+                },
                 cursor_opacity,
             ],
             rotation_params: [
@@ -529,22 +644,57 @@ impl CursorLayer {
     }
 }
 
-fn combine_cursor_motion(parent: XY<f32>, child: XY<f32>) -> XY<f32> {
-    fn combine_axis(parent: f32, child: f32) -> f32 {
-        if parent.abs() > CURSOR_MIN_MOTION_PX
-            && child.abs() > CURSOR_MIN_MOTION_PX
-            && parent.signum() != child.signum()
-        {
-            0.0
-        } else {
-            parent + child
-        }
+fn composite_cursor_layer(dst: &mut [f32; 4], src: [f32; 4]) {
+    let src_a = src[3];
+    if src_a <= 0.0 {
+        return;
     }
 
-    XY::new(
-        combine_axis(parent.x, child.x),
-        combine_axis(parent.y, child.y),
-    )
+    let dst_a = dst[3];
+    let out_a = src_a + dst_a * (1.0 - src_a);
+    if out_a <= 0.0 {
+        return;
+    }
+
+    for i in 0..3 {
+        dst[i] = (src[i] * src_a + dst[i] * dst_a * (1.0 - src_a)) / out_a;
+    }
+    dst[3] = out_a;
+}
+
+fn cursor_height_px(
+    source_screen_height: f32,
+    crop_height: f32,
+    display_frame_height: f32,
+    cursor_size: f32,
+    click_scale_factor: f32,
+) -> f32 {
+    let source_screen_height = finite_positive_or(source_screen_height, 1080.0);
+    let crop_height = finite_positive_or(crop_height, source_screen_height);
+    let display_frame_height = finite_positive_or(display_frame_height, source_screen_height);
+    let cursor_size_factor = if cursor_size <= 0.0 {
+        1.0
+    } else {
+        cursor_size / 100.0
+    };
+
+    STANDARD_CURSOR_HEIGHT
+        * (source_screen_height / 1080.0)
+        * (display_frame_height / crop_height)
+        * cursor_size_factor
+        * click_scale_factor
+}
+
+fn finite_positive_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn cursor_blur_vector(motion: XY<f32>, strength: f32) -> XY<f32> {
+    clamp_cursor_vector(motion * strength)
 }
 
 fn clamp_cursor_vector(vec: XY<f32>) -> XY<f32> {
@@ -804,6 +954,91 @@ mod tests {
                 .collect(),
             clicks: vec![],
         }
+    }
+
+    #[test]
+    fn cursor_height_uses_source_relative_default() {
+        let height = cursor_height_px(1964.0, 1964.0, 864.0, 100.0, 1.0);
+        let expected = STANDARD_CURSOR_HEIGHT * (864.0 / 1080.0);
+
+        assert!((height - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn cursor_height_scales_with_source_crop() {
+        let height = cursor_height_px(2160.0, 1080.0, 1080.0, 100.0, 1.0);
+        let expected = STANDARD_CURSOR_HEIGHT * 2.0;
+
+        assert!((height - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn cursor_height_is_zoomed_once_by_frame_transform() {
+        let options = crate::RenderOptions {
+            camera_size: None,
+            screen_size: XY::new(1080, 1080),
+            preserve_screen_alpha: false,
+        };
+        let mut project = ProjectConfiguration::default();
+        project.background.padding = 0.0;
+        let resolution_base = XY::new(1080, 1080);
+        let zoom = InterpolatedZoom {
+            t: 1.0,
+            bounds: crate::zoom::SegmentBounds::new(XY::new(0.0, 0.0), XY::new(2.0, 2.0)),
+        };
+        let position = Coord::<FrameSpace>::new(XY::new(0.0, 0.0));
+        let size = Coord::<FrameSpace>::new(XY::new(
+            0.0,
+            cursor_height_px(1080.0, 1080.0, 1080.0, 100.0, 1.0) as f64,
+        ));
+
+        let zoomed_position =
+            position.to_zoomed_frame_space(&options, &project, resolution_base, &zoom);
+        let zoomed_size =
+            (position + size).to_zoomed_frame_space(&options, &project, resolution_base, &zoom)
+                - zoomed_position;
+
+        assert!((zoomed_size.y as f32 - STANDARD_CURSOR_HEIGHT * 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn cursor_height_applies_project_size_as_percent() {
+        let height = cursor_height_px(1080.0, 1080.0, 1080.0, 142.0, 1.0);
+
+        assert!((height - STANDARD_CURSOR_HEIGHT * 1.42).abs() < 0.001);
+    }
+
+    #[test]
+    fn cursor_height_falls_back_for_invalid_dimensions() {
+        let height = cursor_height_px(0.0, 0.0, 720.0, 100.0, 1.0);
+        let expected = STANDARD_CURSOR_HEIGHT * (720.0 / 1080.0);
+
+        assert!((height - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn cursor_blur_vector_is_linear_in_travel_and_amount() {
+        // Screen Studio semantics: smear length == per-frame travel x amount,
+        // with no response curve shortening slow-to-medium motion.
+        let motion = cursor_blur_vector(XY::new(40.0, -30.0), 0.5);
+        assert!((motion.x - 20.0).abs() < 1e-4);
+        assert!((motion.y + 15.0).abs() < 1e-4);
+
+        let full = cursor_blur_vector(XY::new(40.0, -30.0), 1.0);
+        assert!((full.x - 40.0).abs() < 1e-4);
+        assert!((full.y + 30.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn cursor_blur_vector_caps_only_teleports() {
+        // Real flicks stay untouched...
+        let flick = cursor_blur_vector(XY::new(200.0, 0.0), 1.0);
+        assert!((flick.x - 200.0).abs() < 1e-4);
+
+        // ...only pathological single-frame jumps hit the safety cap.
+        let teleport = cursor_blur_vector(XY::new(5000.0, 0.0), 1.0);
+        let len = (teleport.x * teleport.x + teleport.y * teleport.y).sqrt();
+        assert!(len <= CURSOR_VECTOR_CAP + f32::EPSILON);
     }
 
     #[test]

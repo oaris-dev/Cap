@@ -48,6 +48,10 @@ export async function proxy(request: NextRequest) {
 	const url = new URL(request.url);
 	const path = url.pathname;
 
+	if (path === "/" && request.cookies.has("next-auth.session-token")) {
+		return NextResponse.redirect(new URL("/dashboard/caps", url.origin));
+	}
+
 	if (path.startsWith("/login")) {
 		const response = NextResponse.next();
 		response.headers.set("X-Frame-Options", "SAMEORIGIN");
@@ -133,7 +137,8 @@ export async function proxy(request: NextRequest) {
 		if (
 			!(
 				path.startsWith("/s/") ||
-				path.startsWith("/embed/") ||
+				path.startsWith("/c/") ||
+				path.startsWith("/cli/") ||
 				path.startsWith("/middleware") ||
 				path.startsWith("/dashboard") ||
 				path.startsWith("/onboarding") ||
@@ -142,9 +147,11 @@ export async function proxy(request: NextRequest) {
 				path.startsWith("/signup") ||
 				path.startsWith("/invite") ||
 				path.startsWith("/self-hosting") ||
+				path.startsWith("/download") ||
 				path.startsWith("/terms") ||
 				path.startsWith("/verify-otp") ||
-				path.startsWith("/.well-known/")
+				path.startsWith("/embed/") ||
+				path.startsWith("/.well-known/workflow/")
 			) &&
 			process.env.NODE_ENV !== "development"
 		)
@@ -159,7 +166,7 @@ export async function proxy(request: NextRequest) {
 	const webUrl = new URL(serverEnv().WEB_URL).hostname;
 
 	try {
-		if (!path.startsWith("/s/")) {
+		if (!(path.startsWith("/s/") || path.startsWith("/c/"))) {
 			const url = new URL(request.url);
 			url.hostname = webUrl;
 			return NextResponse.redirect(url);

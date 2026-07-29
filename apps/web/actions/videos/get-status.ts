@@ -8,6 +8,10 @@ import { provideOptionalAuth, VideosPolicy } from "@cap/web-backend";
 import { Policy, type Video } from "@cap/web-domain";
 import { eq } from "drizzle-orm";
 import { Effect, Exit } from "effect";
+import {
+	isRetryableDesktopSegmentsFinalizationError,
+	queueDesktopSegmentsFinalization,
+} from "@/lib/desktop-segments-finalization";
 import { startAiGeneration } from "@/lib/generate-ai";
 import * as EffectRuntime from "@/lib/server";
 import { transcribeVideo } from "../../lib/transcribe";
@@ -30,6 +34,7 @@ type AiGenerationStatus =
 export interface VideoStatusResult {
 	transcriptionStatus: TranscriptionStatus | null;
 	aiGenerationStatus: AiGenerationStatus | null;
+	name: string | null;
 	aiTitle: string | null;
 	summary: string | null;
 	chapters: { title: string; start: number }[] | null;
@@ -61,16 +66,38 @@ export async function getVideoStatus(
 		(serverEnv().MISTRAL_API_KEY || serverEnv().DEEPGRAM_API_KEY)
 	) {
 		const activeUpload = await db()
-			.select({ videoId: videoUploads.videoId })
+			.select({
+				videoId: videoUploads.videoId,
+				phase: videoUploads.phase,
+				processingError: videoUploads.processingError,
+			})
 			.from(videoUploads)
 			.where(eq(videoUploads.videoId, videoId))
 			.limit(1);
 
 		if (activeUpload.length > 0) {
+			const upload = activeUpload[0];
+			if (
+				video.source?.type === "desktopSegments" &&
+				upload?.phase === "error" &&
+				isRetryableDesktopSegmentsFinalizationError(upload.processingError)
+			) {
+				queueDesktopSegmentsFinalization({
+					videoId,
+					userId: video.ownerId,
+				}).catch((error) => {
+					console.error(
+						`[Get Status] Error queueing segment finalization for video ${videoId}:`,
+						error,
+					);
+				});
+			}
+
 			return {
 				transcriptionStatus: null,
 				aiGenerationStatus:
 					(metadata.aiGenerationStatus as AiGenerationStatus) || null,
+				name: video.name,
 				aiTitle: metadata.aiTitle || null,
 				summary: metadata.summary || null,
 				chapters: metadata.chapters || null,
@@ -80,27 +107,39 @@ export async function getVideoStatus(
 		console.log(
 			`[Get Status] Transcription not started for video ${videoId}, triggering transcription`,
 		);
+		try {
+			transcribeVideo(videoId, video.ownerId).catch((error) => {
+				console.error(
+					`[Get Status] Error starting transcription for video ${videoId}:`,
+					error,
+				);
+			});
 
-		await db()
-			.update(videos)
-			.set({ transcriptionStatus: "PROCESSING" })
-			.where(eq(videos.id, videoId));
-
-		transcribeVideo(videoId, video.ownerId, false, true).catch((error) => {
+			return {
+				transcriptionStatus: "PROCESSING",
+				aiGenerationStatus:
+					(metadata.aiGenerationStatus as AiGenerationStatus) || null,
+				name: video.name,
+				aiTitle: metadata.aiTitle || null,
+				summary: metadata.summary || null,
+				chapters: metadata.chapters || null,
+			};
+		} catch (error) {
 			console.error(
-				`[Get Status] Error starting transcription for video ${videoId}:`,
+				`[Get Status] Error triggering transcription for video ${videoId}:`,
 				error,
 			);
-		});
-
-		return {
-			transcriptionStatus: "PROCESSING",
-			aiGenerationStatus:
-				(metadata.aiGenerationStatus as AiGenerationStatus) || null,
-			aiTitle: metadata.aiTitle || null,
-			summary: metadata.summary || null,
-			chapters: metadata.chapters || null,
-		};
+			return {
+				transcriptionStatus: "ERROR",
+				aiGenerationStatus:
+					(metadata.aiGenerationStatus as AiGenerationStatus) || null,
+				name: video.name,
+				aiTitle: metadata.aiTitle || null,
+				summary: metadata.summary || null,
+				chapters: metadata.chapters || null,
+				error: "Failed to start transcription",
+			};
+		}
 	}
 
 	if (video.transcriptionStatus === "PROCESSING") {
@@ -115,6 +154,7 @@ export async function getVideoStatus(
 				transcriptionStatus: "ERROR",
 				aiGenerationStatus:
 					(metadata.aiGenerationStatus as AiGenerationStatus) || null,
+				name: video.name,
 				aiTitle: metadata.aiTitle || null,
 				summary: metadata.summary || null,
 				chapters: metadata.chapters || null,
@@ -128,6 +168,7 @@ export async function getVideoStatus(
 			transcriptionStatus: "ERROR",
 			aiGenerationStatus:
 				(metadata.aiGenerationStatus as AiGenerationStatus) || null,
+			name: video.name,
 			aiTitle: metadata.aiTitle || null,
 			summary: metadata.summary || null,
 			chapters: metadata.chapters || null,
@@ -171,6 +212,7 @@ export async function getVideoStatus(
 					transcriptionStatus:
 						(video.transcriptionStatus as TranscriptionStatus) || null,
 					aiGenerationStatus: "QUEUED" as AiGenerationStatus,
+					name: video.name,
 					aiTitle: metadata.aiTitle || null,
 					summary: metadata.summary || null,
 					chapters: metadata.chapters || null,
@@ -189,6 +231,7 @@ export async function getVideoStatus(
 			(video.transcriptionStatus as TranscriptionStatus) || null,
 		aiGenerationStatus:
 			(metadata.aiGenerationStatus as AiGenerationStatus) || null,
+		name: video.name,
 		aiTitle: metadata.aiTitle || null,
 		summary: metadata.summary || null,
 		chapters: metadata.chapters || null,

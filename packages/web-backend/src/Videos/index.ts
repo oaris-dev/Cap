@@ -3,11 +3,11 @@ import { buildEnv, NODE_ENV, serverEnv } from "@cap/env";
 import { dub } from "@cap/utils";
 import { CurrentUser, type Folder, Policy, Video } from "@cap/web-domain";
 import * as Dz from "drizzle-orm";
-import { Array, Effect, Exit, Option } from "effect";
+import { Effect, Array as EffectArray, Exit, Option } from "effect";
 import type { Schema } from "effect/Schema";
 
 import { Database } from "../Database.ts";
-import { S3Buckets } from "../S3Buckets/index.ts";
+import { Storage as StorageService } from "../Storage/index.ts";
 import { Tinybird } from "../Tinybird/index.ts";
 import { VideosPolicy } from "./VideosPolicy.ts";
 import type { CreateVideoInput as RepoCreateVideoInput } from "./VideosRepo.ts";
@@ -19,6 +19,58 @@ const formatDate = (date: Date) => date.toISOString().slice(0, 10);
 const formatDateTime = (date: Date) =>
 	date.toISOString().slice(0, 19).replace("T", " ");
 const buildPathname = (videoId: Video.VideoId) => `/s/${videoId}`;
+const SCREENSHOT_OBJECT_KEY_SUFFIXES = [
+	"screenshot/screen-capture.png",
+	"screenshot/screen-capture.jpg",
+	"screenshot/screen-capture.jpeg",
+	"screen-capture.jpg",
+	"screen-capture.jpeg",
+];
+type ScreenshotObject = {
+	Key?: string | null;
+	LastModified?: Date | string | number | null;
+};
+type ScreenshotCandidate = {
+	key: string;
+	suffixIndex: number;
+	lastModified: number | null;
+};
+const getScreenshotObjectTime = (value: ScreenshotObject["LastModified"]) => {
+	if (value == null) return null;
+	const time =
+		value instanceof Date ? value.getTime() : new Date(value).getTime();
+	return Number.isFinite(time) ? time : null;
+};
+export const findScreenshotObjectKey = (
+	contents: ReadonlyArray<ScreenshotObject>,
+) => {
+	const candidates = contents
+		.map((item): ScreenshotCandidate | null => {
+			const key = item.Key;
+			if (!key) return null;
+			const suffixIndex = SCREENSHOT_OBJECT_KEY_SUFFIXES.findIndex((suffix) =>
+				key.endsWith(suffix),
+			);
+			if (suffixIndex < 0) return null;
+			return {
+				key,
+				suffixIndex,
+				lastModified: getScreenshotObjectTime(item.LastModified),
+			};
+		})
+		.filter((item): item is ScreenshotCandidate => item !== null)
+		.sort((a, b) => {
+			if (a.lastModified !== null || b.lastModified !== null) {
+				const timeDiff =
+					(b.lastModified ?? Number.NEGATIVE_INFINITY) -
+					(a.lastModified ?? Number.NEGATIVE_INFINITY);
+				if (timeDiff !== 0) return timeDiff;
+			}
+			return a.suffixIndex - b.suffixIndex;
+		});
+
+	return candidates[0]?.key ?? null;
+};
 const getFileExtensionFromKey = (fileKey: string) => {
 	const fileName = fileKey.split("/").at(-1) ?? "";
 	const extension = fileName.split(".").at(-1)?.toLowerCase();
@@ -47,7 +99,7 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 		const db = yield* Database;
 		const repo = yield* VideosRepo;
 		const policy = yield* VideosPolicy;
-		const s3Buckets = yield* S3Buckets;
+		const storage = yield* StorageService;
 		const tinybird = yield* Tinybird;
 
 		const getByIdForViewing = (id: Video.VideoId) =>
@@ -58,56 +110,25 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 					Effect.withSpan("Videos.getById"),
 				);
 
-		const getAnalyticsBulkInternal = Effect.fn("Videos.getAnalyticsBulk")(
-			function* (videoIds: ReadonlyArray<Video.VideoId>) {
-				if (videoIds.length === 0)
-					return [] as Array<Exit.Exit<{ count: number }, unknown>>;
-
+		const getAnalyticsCounts = Effect.fn("Videos.getAnalyticsCounts")(
+			function* (
+				analyticsVideos: ReadonlyArray<{
+					id: Video.VideoId;
+					orgId: string;
+				}>,
+			) {
 				const now = new Date();
 				const from = new Date(
 					now.getTime() - DEFAULT_ANALYTICS_RANGE_DAYS * 24 * 60 * 60 * 1000,
 				);
-
-				const videoExits = yield* Effect.forEach(
-					videoIds,
-					(videoId) =>
-						getByIdForViewing(videoId).pipe(
-							Effect.map((video) => video),
-							Effect.exit,
-						),
-					{ concurrency: 10 },
-				);
-
-				const successfulVideos: Array<{
-					index: number;
-					videoId: Video.VideoId;
-					video: Video.Video;
-				}> = [];
-
-				for (let index = 0; index < videoExits.length; index++) {
-					const exit = videoExits[index];
-					if (!exit) continue;
-					if (Exit.isSuccess(exit)) {
-						const maybeVideo = exit.value;
-						if (Option.isSome(maybeVideo)) {
-							const [video] = maybeVideo.value;
-							successfulVideos.push({
-								index,
-								videoId: videoIds[index] ?? "",
-								video,
-							});
-						}
-					}
-				}
-
 				const countsByPathname = new Map<string, number>();
 
 				const videosByOrg = new Map<
 					string,
 					Array<{ videoId: Video.VideoId; pathname: string }>
 				>();
-				for (const { video } of successfulVideos) {
-					const key = video.orgId ?? "";
+				for (const video of analyticsVideos) {
+					const key = video.orgId;
 					if (!videosByOrg.has(key)) {
 						videosByOrg.set(key, []);
 					}
@@ -179,12 +200,33 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 					}
 				}
 
-				for (const { videoId } of successfulVideos) {
-					const pathname = buildPathname(videoId);
+				for (const video of analyticsVideos) {
+					const pathname = buildPathname(video.id);
 					if (!countsByPathname.has(pathname)) {
 						countsByPathname.set(pathname, 0);
 					}
 				}
+
+				return countsByPathname;
+			},
+		);
+
+		const getAnalyticsBulkInternal = Effect.fn("Videos.getAnalyticsBulk")(
+			function* (videoIds: ReadonlyArray<Video.VideoId>) {
+				if (videoIds.length === 0)
+					return [] as Array<Exit.Exit<{ count: number }, unknown>>;
+
+				const videoExits = yield* Effect.forEach(
+					videoIds,
+					(videoId) => getByIdForViewing(videoId).pipe(Effect.exit),
+					{ concurrency: 10 },
+				);
+				const analyticsVideos = videoExits.flatMap((exit) => {
+					if (!Exit.isSuccess(exit) || Option.isNone(exit.value)) return [];
+					const [video] = exit.value.value;
+					return [{ id: video.id, orgId: video.orgId }];
+				});
+				const countsByPathname = yield* getAnalyticsCounts(analyticsVideos);
 
 				return videoExits.map((exit, index) =>
 					Exit.map(exit, () => ({
@@ -194,6 +236,32 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 				);
 			},
 		);
+
+		const getAnalyticsBulkForOwner = Effect.fn(
+			"Videos.getAnalyticsBulkForOwner",
+		)(function* (
+			videoIds: ReadonlyArray<Video.VideoId>,
+			ownerId: (typeof Db.videos.$inferSelect)["ownerId"],
+		) {
+			if (videoIds.length === 0) return [];
+			const uniqueVideoIds = Array.from(new Set(videoIds));
+			const rows = yield* db.use((database) =>
+				database
+					.select({ id: Db.videos.id, orgId: Db.videos.orgId })
+					.from(Db.videos)
+					.where(
+						Dz.and(
+							Dz.eq(Db.videos.ownerId, ownerId),
+							Dz.inArray(Db.videos.id, uniqueVideoIds),
+						),
+					),
+			);
+			const countsByPathname = yield* getAnalyticsCounts(rows);
+
+			return videoIds.map((videoId) => ({
+				count: countsByPathname.get(buildPathname(videoId)) ?? 0,
+			}));
+		});
 
 		return {
 			/*
@@ -212,7 +280,7 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 					return yield* Effect.fail(new Video.NotFoundError());
 				const [video] = maybeVideo.value;
 
-				const [bucket] = yield* s3Buckets.getBucketAccess(video.bucketId);
+				const [bucket] = yield* storage.getAccessForVideo(video);
 
 				yield* repo
 					.delete(video.id)
@@ -247,7 +315,7 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 					return yield* Effect.fail(new Video.NotFoundError());
 				const [video] = maybeVideo.value;
 
-				const [bucket] = yield* s3Buckets.getBucketAccess(video.bucketId);
+				const [bucket] = yield* storage.getAccessForVideo(video);
 
 				// Don't duplicate password or sharing data
 				const newVideoId = yield* repo.create(video);
@@ -259,7 +327,7 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 
 				if (allObjects.Contents)
 					yield* Effect.all(
-						Array.filterMap(allObjects.Contents, (obj) =>
+						EffectArray.filterMap(allObjects.Contents, (obj) =>
 							Option.map(Option.fromNullable(obj.Key), (key) => {
 								const newKey = key.replace(prefix, newPrefix);
 								return bucket.copyObject(
@@ -379,15 +447,13 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 					if (user.activeOrganizationId !== input.orgId)
 						return yield* Effect.fail(new Policy.PolicyDeniedError());
 
-					const [customBucket] = yield* db.use((db) =>
-						db
-							.select()
-							.from(Db.s3Buckets)
-							.where(Dz.eq(Db.s3Buckets.ownerId, user.id)),
+					const writable = yield* storage.getWritableAccessForUser(
+						user.id,
+						input.orgId,
 					);
-
-					const bucketId: RepoCreateVideoInput["bucketId"] =
-						Option.fromNullable(customBucket?.id);
+					const bucketId: RepoCreateVideoInput["bucketId"] = writable.bucketId;
+					const storageIntegrationId: RepoCreateVideoInput["storageIntegrationId"] =
+						writable.storageIntegrationId;
 					const folderId: RepoCreateVideoInput["folderId"] =
 						input.folderId ?? Option.none<Folder.FolderId>();
 					const width: RepoCreateVideoInput["width"] = Option.fromNullable(
@@ -414,6 +480,7 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 						public: serverEnv().CAP_VIDEOS_DEFAULT_PUBLIC,
 						source: { type: "webMP4" },
 						bucketId,
+						storageIntegrationId,
 						folderId,
 						width,
 						height,
@@ -432,9 +499,9 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 						);
 
 					const fileKey = `${user.id}/${videoId}/result.mp4`;
-					const [bucket] = yield* s3Buckets.getBucketAccess(bucketId);
-					const presignedPostData = yield* bucket.getPresignedPostUrl(fileKey, {
-						Fields: {
+					const upload = yield* writable.access.createUploadTarget(fileKey, {
+						contentType: "video/mp4",
+						fields: {
 							"Content-Type": "video/mp4",
 							"x-amz-meta-userid": user.id,
 							"x-amz-meta-duration": input.durationSeconds
@@ -444,15 +511,41 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 							"x-amz-meta-videocodec": input.videoCodec ?? "",
 							"x-amz-meta-audiocodec": input.audioCodec ?? "",
 						},
-						Expires: 1800,
 					});
 
-					const shareUrl = `${serverEnv().WEB_URL}/s/${videoId}`;
+					const canonicalShareUrl = `${serverEnv().WEB_URL}/s/${videoId}`;
+
+					const verifiedCustomDomain = yield* db
+						.use((db) =>
+							db
+								.select({
+									customDomain: Db.organizations.customDomain,
+									domainVerified: Db.organizations.domainVerified,
+								})
+								.from(Db.organizations)
+								.where(Dz.eq(Db.organizations.id, input.orgId))
+								.limit(1),
+						)
+						.pipe(
+							Effect.map(([org]) =>
+								org?.customDomain && org.domainVerified
+									? org.customDomain.startsWith("http://") ||
+										org.customDomain.startsWith("https://")
+										? org.customDomain
+										: `https://${org.customDomain}`
+									: null,
+							),
+							Effect.catchAll(() => Effect.succeed(null)),
+						);
+
+					const shareUrl = verifiedCustomDomain
+						? `${verifiedCustomDomain}/s/${videoId}`
+						: canonicalShareUrl;
 
 					if (buildEnv.NEXT_PUBLIC_IS_CAP && NODE_ENV === "production")
 						yield* Effect.tryPromise(() =>
 							dub().links.create({
-								url: shareUrl,
+								url: canonicalShareUrl,
 								domain: "cap.link",
 								key: videoId,
 							}),
@@ -465,10 +558,7 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 					return {
 						id: videoId,
 						shareUrl,
-						upload: {
-							url: presignedPostData.url,
-							fields: presignedPostData.fields,
-						},
+						upload,
 					};
 				},
 			),
@@ -485,7 +575,30 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 					return yield* Effect.fail(new Video.NotFoundError());
 				const [video] = maybeVideo.value;
 
-				const [bucket] = yield* s3Buckets.getBucketAccess(video.bucketId);
+				const [bucket] = yield* storage.getAccessForVideo(video);
+				const [videoRow] = yield* db.use((db) =>
+					db
+						.select({ isScreenshot: Db.videos.isScreenshot })
+						.from(Db.videos)
+						.where(Dz.eq(Db.videos.id, videoId)),
+				);
+
+				if (videoRow?.isScreenshot) {
+					const listResponse = yield* bucket.listObjects({
+						prefix: `${video.ownerId}/${video.id}/`,
+					});
+					const screenshotKey = findScreenshotObjectKey(
+						listResponse.Contents || [],
+					);
+					if (!screenshotKey) return Option.none();
+					const extension = getFileExtensionFromKey(screenshotKey) ?? "jpg";
+					const downloadUrl = yield* bucket.getSignedObjectUrl(screenshotKey);
+					return Option.some({
+						fileName: `${video.name}.${extension}`,
+						downloadUrl,
+					});
+				}
+
 				const src = Video.Video.getSource(video);
 
 				if (src instanceof Video.Mp4Source && video.source.type === "webMP4") {
@@ -544,14 +657,12 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 				if (Option.isNone(maybeVideo)) return Option.none();
 				const [video] = maybeVideo.value;
 
-				const [bucket] = yield* s3Buckets.getBucketAccess(video.bucketId);
+				const [bucket] = yield* storage.getAccessForVideo(video);
 				const listResponse = yield* bucket.listObjects({
 					prefix: `${video.ownerId}/${video.id}/`,
 				});
 				const contents = listResponse.Contents || [];
-				const thumbnailKey = contents.find((item) =>
-					item.Key?.endsWith("screen-capture.jpg"),
-				)?.Key;
+				const thumbnailKey = findScreenshotObjectKey(contents);
 				if (!thumbnailKey) return Option.none();
 				const url = yield* bucket.getSignedObjectUrl(thumbnailKey);
 				return Option.some(url);
@@ -568,13 +679,14 @@ export class Videos extends Effect.Service<Videos>()("Videos", {
 				});
 			}),
 			getAnalyticsBulk: getAnalyticsBulkInternal,
+			getAnalyticsBulkForOwner,
 		};
 	}),
 	dependencies: [
 		VideosPolicy.Default,
 		VideosRepo.Default,
 		Database.Default,
-		S3Buckets.Default,
+		StorageService.Default,
 		Tinybird.Default,
 	],
 }) {}

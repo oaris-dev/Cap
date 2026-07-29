@@ -6,6 +6,8 @@ import { useInvalidateTranscript, useTranscript } from "hooks/use-transcript";
 import {
 	Check,
 	ChevronDown,
+	Copy,
+	Download,
 	Edit3,
 	Globe,
 	MessageSquare,
@@ -18,6 +20,7 @@ import {
 	SUPPORTED_LANGUAGES,
 } from "@/actions/videos/translation-languages";
 import { useCurrentUser } from "@/app/Layout/AuthContext";
+import { normalizeTranscriptCueText } from "@/lib/transcript-vtt";
 import { t } from "@/lib/translations";
 import type { VideoData } from "../../types";
 import { useCaptionContext } from "../CaptionContext";
@@ -143,6 +146,9 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 	const [editText, setEditText] = useState<string>("");
 	const [isSaving, setIsSaving] = useState(false);
 	const [showLanguageMenu, setShowLanguageMenu] = useState(false);
+	const [isCopying, setIsCopying] = useState(false);
+	const [copyPressed, setCopyPressed] = useState(false);
+	const [downloadPressed, setDownloadPressed] = useState(false);
 	const languageMenuRef = useRef<HTMLDivElement>(null);
 	const selectedLanguage =
 		captionContext.selectedLanguage === "off"
@@ -235,6 +241,83 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 		onSeek?.(entry.startTime);
 	};
 
+	const formatTranscriptForClipboard = (entries: TranscriptEntry[]): string => {
+		return entries
+			.map((entry) => `[${entry.timestamp}] ${entry.text}`)
+			.join("\n\n");
+	};
+
+	const formatTranscriptAsVTT = (entries: TranscriptEntry[]): string => {
+		const vttHeader = "WEBVTT\n\n";
+
+		const vttEntries = entries.map((entry, index) => {
+			const startSeconds = entry.startTime;
+			const nextEntry = entries[index + 1];
+			const endSeconds = nextEntry ? nextEntry.startTime : startSeconds + 3;
+
+			const formatTime = (seconds: number): string => {
+				const hours = Math.floor(seconds / 3600);
+				const minutes = Math.floor((seconds % 3600) / 60);
+				const secs = Math.floor(seconds % 60);
+				const milliseconds = Math.floor((seconds % 1) * 1000);
+
+				return `${hours.toString().padStart(2, "0")}:${minutes
+					.toString()
+					.padStart(2, "0")}:${secs.toString().padStart(2, "0")}.${milliseconds
+					.toString()
+					.padStart(3, "0")}`;
+			};
+
+			return `${entry.id}\n${formatTime(startSeconds)} --> ${formatTime(
+				endSeconds,
+			)}\n${entry.text}\n`;
+		});
+
+		return vttHeader + vttEntries.join("\n");
+	};
+
+	const copyTranscriptToClipboard = async () => {
+		if (transcriptData.length === 0) return;
+
+		setIsCopying(true);
+		try {
+			const formattedTranscript = formatTranscriptForClipboard(transcriptData);
+			await navigator.clipboard.writeText(formattedTranscript);
+			setCopyPressed(true);
+			setTimeout(() => {
+				setCopyPressed(false);
+			}, 2000);
+		} catch (error) {
+			console.error("Failed to copy transcript:", error);
+		} finally {
+			setIsCopying(false);
+		}
+	};
+
+	const downloadTranscriptFile = () => {
+		if (transcriptData.length === 0) return;
+
+		const vttContent = formatTranscriptAsVTT(transcriptData);
+		const blob = new Blob([vttContent], { type: "text/vtt" });
+		const url = URL.createObjectURL(blob);
+
+		const langSuffix =
+			selectedLanguage === "original" ? "" : `.${selectedLanguage}`;
+		const link = document.createElement("a");
+		link.href = url;
+		link.download = `transcript-${data.id}${langSuffix}.vtt`;
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
+
+		URL.revokeObjectURL(url);
+
+		setDownloadPressed(true);
+		setTimeout(() => {
+			setDownloadPressed(false);
+		}, 2000);
+	};
+
 	const startEditing = (entry: TranscriptEntry) => {
 		setEditingEntry(entry.id);
 		setEditText(entry.text);
@@ -246,7 +329,9 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 	};
 
 	const saveEdit = async () => {
-		if (!editingEntry || !editText.trim()) {
+		const normalizedEditText = normalizeTranscriptCueText(editText);
+
+		if (!editingEntry || !normalizedEditText) {
 			return;
 		}
 
@@ -256,13 +341,17 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 
 		setIsSaving(true);
 		try {
-			const result = await editTranscriptEntry(data.id, editingEntry, editText);
+			const result = await editTranscriptEntry(
+				data.id,
+				editingEntry,
+				normalizedEditText,
+			);
 
 			if (result.success) {
 				setTranscriptData((prev) =>
 					prev.map((entry) =>
 						entry.id === editingEntry
-							? { ...entry, text: editText.trim() }
+							? { ...entry, text: normalizedEditText }
 							: entry,
 					),
 				);
@@ -319,6 +408,7 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 				<div className="text-center">
 					<div className="mb-3">
 						<svg
+							aria-hidden="true"
 							xmlns="http://www.w3.org/2000/svg"
 							className="mx-auto w-8 h-8"
 							viewBox="0 0 24 24"
@@ -351,6 +441,7 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 		return (
 			<div className="flex justify-center items-center h-full">
 				<svg
+					aria-hidden="true"
 					xmlns="http://www.w3.org/2000/svg"
 					className="w-8 h-8"
 					viewBox="0 0 24 24"
@@ -479,57 +570,119 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 
 	return (
 		<div className="flex flex-col h-full">
-			{captionContext.availableTranslations.length > 0 && (
-				<div className="flex items-center justify-end px-4 py-2 border-b border-gray-3">
-					<div className="relative" ref={languageMenuRef}>
-						<button
-							type="button"
-							onClick={() => setShowLanguageMenu(!showLanguageMenu)}
-							className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-gray-11 hover:text-gray-12 hover:bg-gray-3 rounded-md transition-colors"
+			<div className="p-4 border-b border-gray-3">
+				<div className="flex flex-col gap-3">
+					<div className="flex gap-2 justify-end">
+						<Button
+							onClick={copyTranscriptToClipboard}
+							disabled={isCopying || transcriptData.length === 0}
+							variant="white"
+							size="xs"
+							spinner={isCopying}
 						>
-							<Globe className="w-3.5 h-3.5" />
-							{selectedLanguage === "original"
-								? t("transcript.original")
-								: SUPPORTED_LANGUAGES[selectedLanguage]}
-							<ChevronDown className="w-3 h-3" />
-						</button>
-						{showLanguageMenu && (
-							<div className="absolute right-0 top-full mt-1 w-48 bg-gray-1 border border-gray-4 rounded-lg shadow-lg z-20 py-1 max-h-64 overflow-y-auto">
+							{!copyPressed ? (
+								<Copy className="mr-1 w-3 h-3" />
+							) : (
+								<svg
+									aria-hidden="true"
+									xmlns="http://www.w3.org/2000/svg"
+									width="12"
+									height="12"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="2"
+									strokeLinecap="round"
+									strokeLinejoin="round"
+									className="mr-1 w-3 h-3 svgpathanimation"
+								>
+									<path d="M20 6 9 17l-5-5" />
+								</svg>
+							)}
+							{copyPressed ? "Copied" : "Copy Transcript"}
+						</Button>
+						<Button
+							onClick={downloadTranscriptFile}
+							disabled={transcriptData.length === 0}
+							variant="white"
+							size="xs"
+						>
+							{!downloadPressed ? (
+								<Download className="mr-1 w-3 h-3" />
+							) : (
+								<svg
+									aria-hidden="true"
+									xmlns="http://www.w3.org/2000/svg"
+									width="12"
+									height="12"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="2"
+									strokeLinecap="round"
+									strokeLinejoin="round"
+									className="mr-1 w-3 h-3 svgpathanimation"
+								>
+									<path d="M20 6 9 17l-5-5" />
+								</svg>
+							)}
+							{downloadPressed ? "Downloaded" : "Download"}
+						</Button>
+					</div>
+					{captionContext.availableTranslations.length > 0 && (
+						<div className="flex justify-end">
+							<div className="relative" ref={languageMenuRef}>
 								<button
 									type="button"
-									onClick={() => handleLanguageChange("original")}
-									className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-3 transition-colors ${
-										selectedLanguage === "original"
-											? "text-blue-500 font-medium"
-											: "text-gray-11"
-									}`}
+									onClick={() => setShowLanguageMenu(!showLanguageMenu)}
+									className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-gray-11 hover:text-gray-12 hover:bg-gray-3 rounded-md transition-colors"
 								>
-									{t("transcript.original")}
+									<Globe className="w-3.5 h-3.5" />
+									{selectedLanguage === "original"
+										? t("transcript.original")
+										: SUPPORTED_LANGUAGES[selectedLanguage]}
+									<ChevronDown className="w-3 h-3" />
 								</button>
-								{captionContext.availableTranslations.map((translation) => (
-									<button
-										key={translation.code}
-										type="button"
-										onClick={() => handleLanguageChange(translation.code)}
-										className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-3 transition-colors ${
-											selectedLanguage === translation.code
-												? "text-blue-500 font-medium"
-												: "text-gray-11"
-										}`}
-									>
-										{translation.name}
-									</button>
-								))}
+								{showLanguageMenu && (
+									<div className="absolute right-0 top-full mt-1 w-48 bg-gray-1 border border-gray-4 rounded-lg shadow-lg z-20 py-1 max-h-64 overflow-y-auto">
+										<button
+											type="button"
+											onClick={() => handleLanguageChange("original")}
+											className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-3 transition-colors ${
+												selectedLanguage === "original"
+													? "text-blue-500 font-medium"
+													: "text-gray-11"
+											}`}
+										>
+											{t("transcript.original")}
+										</button>
+										{captionContext.availableTranslations.map((translation) => (
+											<button
+												key={translation.code}
+												type="button"
+												onClick={() => handleLanguageChange(translation.code)}
+												className={`w-full text-left px-3 py-2 text-xs hover:bg-gray-3 transition-colors ${
+													selectedLanguage === translation.code
+														? "text-blue-500 font-medium"
+														: "text-gray-11"
+												}`}
+											>
+												{translation.name}
+											</button>
+										))}
+									</div>
+								)}
 							</div>
-						)}
-					</div>
+						</div>
+					)}
 				</div>
-			)}
+			</div>
 			<div className="overflow-y-auto flex-1 relative">
 				{isTranslating && (
 					<div className="absolute inset-0 bg-gray-1/80 flex items-center justify-center z-10">
 						<div className="text-center">
 							<svg
+								aria-hidden="true"
 								xmlns="http://www.w3.org/2000/svg"
 								className="mx-auto w-8 h-8"
 								viewBox="0 0 24 24"
@@ -567,8 +720,7 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 									: selectedEntry === entry.id
 										? "bg-gray-2 p-3"
 										: "hover:bg-gray-2 p-3"
-							} ${editingEntry === entry.id ? "" : "cursor-pointer"}`}
-							onClick={() => handleTranscriptClick(entry)}
+							}`}
 						>
 							<div className="flex justify-between items-start mb-2">
 								<div className="text-xs font-medium text-gray-8">
@@ -632,9 +784,13 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 									</div>
 								</div>
 							) : (
-								<div className="text-sm leading-relaxed text-gray-12">
+								<button
+									className="block w-full text-sm leading-relaxed text-left text-gray-12"
+									onClick={() => handleTranscriptClick(entry)}
+									type="button"
+								>
 									{entry.text}
-								</div>
+								</button>
 							)}
 						</div>
 					))}

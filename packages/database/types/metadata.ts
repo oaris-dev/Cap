@@ -19,6 +19,7 @@ export interface VideoMetadata {
 	 * AI generated title for the video
 	 */
 	aiTitle?: string;
+	titleManuallyEdited?: boolean;
 	/**
 	 * AI generated summary of the content
 	 */
@@ -34,7 +35,22 @@ export interface VideoMetadata {
 		| "ERROR"
 		| "SKIPPED";
 	enhancedAudioStatus?: "PROCESSING" | "COMPLETE" | "ERROR" | "SKIPPED";
+	agentUpload?: {
+		state: "pending" | "accepted" | "rejected";
+		rawFileKey?: string;
+	};
 }
+
+export type VideoEditRange = {
+	start: number;
+	end: number;
+};
+
+export type VideoEditSpec = {
+	version: 1;
+	sourceDuration: number;
+	keepRanges: VideoEditRange[];
+};
 
 /**
  * Space metadata structure
