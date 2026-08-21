@@ -3,6 +3,7 @@ import "server-only";
 import { decrypt, encrypt } from "@cap/database/crypto";
 import { cookies } from "next/headers";
 import {
+	isPerVideoPasswordPayload,
 	PER_VIDEO_PASSWORD_COOKIE_PREFIX,
 	VERIFIED_PASSWORD_COOKIE,
 } from "./password-cookie-shared";
@@ -40,6 +41,9 @@ async function decodeHashes(cookieValue: string): Promise<string[]> {
 			parsed.every((hash) => typeof hash === "string")
 		) {
 			return parsed;
+		}
+		if (isPerVideoPasswordPayload(parsed)) {
+			return [parsed.h];
 		}
 	} catch {
 		// Legacy cookie: the decrypted value is the hash itself.

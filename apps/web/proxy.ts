@@ -1,5 +1,5 @@
 import { db } from "@cap/database";
-import { encrypt } from "@cap/database/crypto";
+import { decrypt, encrypt } from "@cap/database/crypto";
 import { organizations, videos } from "@cap/database/schema";
 import { buildEnv, serverEnv } from "@cap/env";
 import type { Video } from "@cap/web-domain";
@@ -7,7 +7,12 @@ import { eq } from "drizzle-orm";
 import { notFound } from "next/navigation";
 import { type NextRequest, NextResponse, userAgent } from "next/server";
 import { verifyEmbedToken } from "@/lib/embed-token";
-import { perVideoPasswordCookieName } from "@/lib/password-cookie-shared";
+import {
+	isPerVideoPasswordPayload,
+	MAX_PER_VIDEO_COOKIES,
+	PER_VIDEO_PASSWORD_COOKIE_PREFIX,
+	perVideoPasswordCookieName,
+} from "@/lib/password-cookie-shared";
 
 const addHttps = (s?: string) => {
 	if (!s) return s;
@@ -23,6 +28,38 @@ const mainOrigins = [
 	addHttps(serverEnv().VERCEL_BRANCH_URL_HOST),
 	addHttps(serverEnv().VERCEL_PROJECT_PRODUCTION_URL_HOST),
 ].filter(Boolean) as string[];
+
+async function retiredPerVideoCookies(
+	request: NextRequest,
+	keepCookieName: string,
+): Promise<string[]> {
+	const existing = request.cookies
+		.getAll()
+		.filter(
+			(cookie) =>
+				cookie.name.startsWith(PER_VIDEO_PASSWORD_COOKIE_PREFIX) &&
+				cookie.name !== keepCookieName,
+		);
+
+	if (existing.length < MAX_PER_VIDEO_COOKIES) return [];
+
+	const dated = await Promise.all(
+		existing.map(async (cookie) => {
+			try {
+				const parsed: unknown = JSON.parse(await decrypt(cookie.value));
+				if (isPerVideoPasswordPayload(parsed)) {
+					return { name: cookie.name, issuedAt: parsed.t };
+				}
+			} catch {}
+			return { name: cookie.name, issuedAt: 0 };
+		}),
+	);
+
+	return dated
+		.sort((a, b) => a.issuedAt - b.issuedAt)
+		.slice(0, existing.length - MAX_PER_VIDEO_COOKIES + 1)
+		.map((cookie) => cookie.name);
+}
 
 function isFromAllowedEmbedOrigin(request: NextRequest): boolean {
 	const raw = serverEnv().ALLOWED_EMBED_ORIGINS;
@@ -101,7 +138,12 @@ export async function proxy(request: NextRequest) {
 						.from(videos)
 						.where(eq(videos.id, videoId as Video.VideoId));
 					if (video?.password) {
-						encryptedPassword = await encrypt(video.password);
+						encryptedPassword = await encrypt(
+							JSON.stringify({
+								h: video.password,
+								t: Math.floor(Date.now() / 1000),
+							}),
+						);
 					}
 				} catch (e) {
 					console.error("Embed password lookup failed:", e);
@@ -125,6 +167,13 @@ export async function proxy(request: NextRequest) {
 		response.headers.delete("X-Frame-Options");
 
 		if (encryptedPassword && passwordCookieName) {
+			for (const staleCookie of await retiredPerVideoCookies(
+				request,
+				passwordCookieName,
+			)) {
+				response.cookies.set(staleCookie, "", { path: "/", maxAge: 0 });
+			}
+
 			response.cookies.set(passwordCookieName, encryptedPassword, {
 				httpOnly: true,
 				secure: process.env.NODE_ENV === "production",

@@ -85,3 +85,39 @@ describe("getVerifiedPasswordHashes", () => {
 		await expect(getVerifiedPasswordHashes()).resolves.toEqual(["sameHash"]);
 	});
 });
+
+describe("per-video cookie payloads", () => {
+	beforeEach(() => {
+		cookieStore.entries = [];
+	});
+
+	it("reads the timestamped payload format written by the proxy", async () => {
+		cookieStore.entries = [
+			{
+				name: "x-cap-password-video1",
+				value: 'enc:{"h":"hashOne","t":1700000000}',
+			},
+		];
+
+		await expect(getVerifiedPasswordHashes()).resolves.toEqual(["hashOne"]);
+	});
+
+	it("still reads bare-hash cookies written before the payload format", async () => {
+		cookieStore.entries = [
+			{ name: "x-cap-password-video1", value: "enc:legacyHash" },
+		];
+
+		await expect(getVerifiedPasswordHashes()).resolves.toEqual(["legacyHash"]);
+	});
+
+	it("mixes payload, legacy and shared-array cookies", async () => {
+		cookieStore.entries = [
+			{ name: "x-cap-password", value: 'enc:["sharedHash"]' },
+			{ name: "x-cap-password-video1", value: 'enc:{"h":"newHash","t":1}' },
+			{ name: "x-cap-password-video2", value: "enc:legacyHash" },
+		];
+
+		const hashes = await getVerifiedPasswordHashes();
+		expect(hashes.sort()).toEqual(["legacyHash", "newHash", "sharedHash"]);
+	});
+});
