@@ -15,6 +15,12 @@ export function perVideoPasswordCookieName(videoId: string) {
 // the set is capped and the oldest entries are retired once it is reached.
 export const MAX_PER_VIDEO_COOKIES = 12;
 
+// Retirement is primarily age-based because that decision depends only on the
+// cookie being examined, so concurrent embeds reach the same answer instead of
+// racing over a shared view of the jar. The count cap is a backstop.
+export const PER_VIDEO_COOKIE_MAX_AGE_SECONDS = 3600;
+export const PER_VIDEO_COOKIE_STALE_AFTER_SECONDS = 1800;
+
 export type PerVideoPasswordPayload = {
 	h: string;
 	t: number;

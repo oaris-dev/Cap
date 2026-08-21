@@ -10,6 +10,8 @@ import { verifyEmbedToken } from "@/lib/embed-token";
 import {
 	isPerVideoPasswordPayload,
 	MAX_PER_VIDEO_COOKIES,
+	PER_VIDEO_COOKIE_MAX_AGE_SECONDS,
+	PER_VIDEO_COOKIE_STALE_AFTER_SECONDS,
 	PER_VIDEO_PASSWORD_COOKIE_PREFIX,
 	perVideoPasswordCookieName,
 } from "@/lib/password-cookie-shared";
@@ -41,8 +43,6 @@ async function retiredPerVideoCookies(
 				cookie.name !== keepCookieName,
 		);
 
-	if (existing.length < MAX_PER_VIDEO_COOKIES) return [];
-
 	const dated = await Promise.all(
 		existing.map(async (cookie) => {
 			try {
@@ -55,10 +55,22 @@ async function retiredPerVideoCookies(
 		}),
 	);
 
-	return dated
-		.sort((a, b) => a.issuedAt - b.issuedAt)
-		.slice(0, existing.length - MAX_PER_VIDEO_COOKIES + 1)
-		.map((cookie) => cookie.name);
+	const nowSeconds = Math.floor(Date.now() / 1000);
+	const stale = dated.filter(
+		(cookie) =>
+			nowSeconds - cookie.issuedAt >= PER_VIDEO_COOKIE_STALE_AFTER_SECONDS,
+	);
+
+	const fresh = dated
+		.filter((cookie) => !stale.includes(cookie))
+		.sort((a, b) => a.issuedAt - b.issuedAt);
+
+	const overflow =
+		fresh.length >= MAX_PER_VIDEO_COOKIES
+			? fresh.slice(0, fresh.length - MAX_PER_VIDEO_COOKIES + 1)
+			: [];
+
+	return [...stale, ...overflow].map((cookie) => cookie.name);
 }
 
 function isFromAllowedEmbedOrigin(request: NextRequest): boolean {
@@ -179,7 +191,7 @@ export async function proxy(request: NextRequest) {
 				secure: process.env.NODE_ENV === "production",
 				sameSite: "lax",
 				path: "/",
-				maxAge: 3600,
+				maxAge: PER_VIDEO_COOKIE_MAX_AGE_SECONDS,
 			});
 		}
 
