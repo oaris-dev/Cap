@@ -1,11 +1,13 @@
 import { db } from "@cap/database";
+import { encrypt } from "@cap/database/crypto";
 import { organizations, videos } from "@cap/database/schema";
 import { buildEnv, serverEnv } from "@cap/env";
 import type { Video } from "@cap/web-domain";
 import { eq } from "drizzle-orm";
 import { notFound } from "next/navigation";
 import { type NextRequest, NextResponse, userAgent } from "next/server";
-import { signEmbedToken, verifyEmbedToken } from "@/lib/embed-token";
+import { verifyEmbedToken } from "@/lib/embed-token";
+import { perVideoPasswordCookieName } from "@/lib/password-cookie-shared";
 
 const addHttps = (s?: string) => {
 	if (!s) return s;
@@ -73,45 +75,64 @@ export async function proxy(request: NextRequest) {
 	if (path.startsWith("/embed/")) {
 		const videoIdMatch = path.match(/^\/embed\/([^/]+)/);
 		const videoId = videoIdMatch?.[1];
-		let mintedTokenUrl: URL | null = null;
+		let encryptedPassword: string | null = null;
 
 		if (videoId) {
-			let hasValidToken = false;
+			let authenticated = false;
 
 			const token = url.searchParams.get("token");
 			if (token && token.length > 0 && token.length < 2048) {
 				try {
 					const result = await verifyEmbedToken(token, videoId);
-					hasValidToken = result.valid;
+					authenticated = result.valid;
 				} catch (e) {
 					console.error("Embed token verification failed:", e);
 				}
 			}
 
-			if (!hasValidToken && isFromAllowedEmbedOrigin(request)) {
+			if (!authenticated) {
+				authenticated = isFromAllowedEmbedOrigin(request);
+			}
+
+			if (authenticated) {
 				try {
 					const [video] = await db()
 						.select({ password: videos.password })
 						.from(videos)
 						.where(eq(videos.id, videoId as Video.VideoId));
-
 					if (video?.password) {
-						const mintedToken = await signEmbedToken(videoId, "24h");
-						mintedTokenUrl = new URL(url);
-						mintedTokenUrl.searchParams.set("token", mintedToken);
+						encryptedPassword = await encrypt(video.password);
 					}
 				} catch (e) {
-					console.error("Embed token minting failed:", e);
+					console.error("Embed password lookup failed:", e);
 				}
 			}
 		}
 
-		const response = mintedTokenUrl
-			? NextResponse.rewrite(mintedTokenUrl)
-			: NextResponse.next();
+		const passwordCookieName = videoId
+			? perVideoPasswordCookieName(videoId)
+			: null;
+
+		if (encryptedPassword && passwordCookieName) {
+			request.cookies.set(passwordCookieName, encryptedPassword);
+		}
+
+		const response = NextResponse.next({
+			request: { headers: request.headers },
+		});
 		response.headers.set("Access-Control-Allow-Origin", "*");
 		response.headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
 		response.headers.delete("X-Frame-Options");
+
+		if (encryptedPassword && passwordCookieName) {
+			response.cookies.set(passwordCookieName, encryptedPassword, {
+				httpOnly: true,
+				secure: process.env.NODE_ENV === "production",
+				sameSite: "lax",
+				path: "/",
+				maxAge: 3600,
+			});
+		}
 
 		return response;
 	}

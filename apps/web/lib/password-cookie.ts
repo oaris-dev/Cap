@@ -2,8 +2,14 @@ import "server-only";
 
 import { decrypt, encrypt } from "@cap/database/crypto";
 import { cookies } from "next/headers";
+import {
+	PER_VIDEO_PASSWORD_COOKIE_PREFIX,
+	VERIFIED_PASSWORD_COOKIE,
+} from "./password-cookie-shared";
 
-const COOKIE_NAME = "x-cap-password";
+export { perVideoPasswordCookieName } from "./password-cookie-shared";
+
+const COOKIE_NAME = VERIFIED_PASSWORD_COOKIE;
 
 // A verified hash is ~64 base64 chars, so 10 entries encrypt to well under
 // the 4KB cookie limit while covering any realistic number of concurrently
@@ -16,10 +22,7 @@ const MAX_VERIFIED_HASHES = 10;
  * resource never evicts another; pre-array cookies that hold a single bare
  * hash are still accepted.
  */
-export async function getVerifiedPasswordHashes(): Promise<string[]> {
-	const cookieValue = (await cookies()).get(COOKIE_NAME)?.value;
-	if (!cookieValue) return [];
-
+async function decodeHashes(cookieValue: string): Promise<string[]> {
 	let decrypted: string;
 	try {
 		// decrypt is async — without the await its rejection (corrupt or stale
@@ -42,6 +45,23 @@ export async function getVerifiedPasswordHashes(): Promise<string[]> {
 		// Legacy cookie: the decrypted value is the hash itself.
 	}
 	return [decrypted];
+}
+
+export async function getVerifiedPasswordHashes(): Promise<string[]> {
+	const store = await cookies();
+	const relevant = store
+		.getAll()
+		.filter(
+			(cookie) =>
+				cookie.name === COOKIE_NAME ||
+				cookie.name.startsWith(PER_VIDEO_PASSWORD_COOKIE_PREFIX),
+		);
+
+	const decoded = await Promise.all(
+		relevant.map((cookie) => decodeHashes(cookie.value)),
+	);
+
+	return [...new Set(decoded.flat())];
 }
 
 /**
