@@ -399,3 +399,58 @@ describe("resolvePlaybackSource transient failures", () => {
 		expect(result).toBeNull();
 	});
 });
+
+describe("playback probe diagnostics", () => {
+	const noSleep = () => Promise.resolve();
+
+	it("logs the failing status and redacts the signed query string", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const fetchImpl = vi
+			.fn<typeof fetch>()
+			.mockResolvedValue(
+				createResponse(
+					"https://storage.example/oa-cap/video.mp4?X-Amz-Signature=secret&_t=950",
+					{ status: 503 },
+				),
+			);
+
+		await resolvePlaybackSource({
+			videoSrc:
+				"https://storage.example/oa-cap/video.mp4?X-Amz-Signature=secret",
+			fetchImpl,
+			now: () => 950,
+			maxProbeAttempts: 2,
+			sleepImpl: noSleep,
+		});
+
+		const payloads = warn.mock.calls.map((call) => String(call[1]));
+		expect(payloads.length).toBe(2);
+		expect(payloads[0]).toContain('"status":503');
+		expect(payloads[0]).toContain('"willRetry":true');
+		expect(payloads[1]).toContain('"willRetry":false');
+		expect(payloads.join()).not.toContain("X-Amz-Signature");
+
+		warn.mockRestore();
+	});
+
+	it("records network errors with a null status", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const fetchImpl = vi
+			.fn<typeof fetch>()
+			.mockRejectedValue(new TypeError("Failed to fetch"));
+
+		await resolvePlaybackSource({
+			videoSrc: "https://storage.example/video.mp4",
+			fetchImpl,
+			now: () => 960,
+			sleepImpl: noSleep,
+		});
+
+		expect(String(warn.mock.calls[0]?.[1])).toContain(
+			'"reason":"network-error"',
+		);
+		expect(String(warn.mock.calls[0]?.[1])).toContain('"status":null');
+
+		warn.mockRestore();
+	});
+});

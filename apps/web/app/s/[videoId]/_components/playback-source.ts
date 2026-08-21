@@ -38,6 +38,29 @@ const DEFAULT_PROBE_RETRY_DELAY_MS = 300;
 const defaultSleep = (ms: number) =>
 	new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+function redactProbeUrl(url: string): string {
+	const [withoutQuery] = url.split("?");
+	return withoutQuery ?? url;
+}
+
+function reportProbeFailure(
+	failure: ProbeFailure,
+	attempt: number,
+	willRetry: boolean,
+) {
+	if (typeof console === "undefined") return;
+	console.warn(
+		"[playback-probe] source probe failed",
+		JSON.stringify({
+			url: redactProbeUrl(failure.url),
+			reason: failure.reason,
+			status: failure.status ?? null,
+			attempt,
+			willRetry,
+		}),
+	);
+}
+
 function isRetryableProbeStatus(status: number): boolean {
 	return status === 408 || status === 425 || status === 429 || status >= 500;
 }
@@ -85,8 +108,16 @@ async function probePlaybackSourceWithRetry(
 ): Promise<ProbeOutcome> {
 	let lastOutcome = await probePlaybackSource(url, fetchImpl, now);
 
-	for (let attempt = 1; attempt < maxAttempts; attempt++) {
-		if (isProbeResult(lastOutcome) || !isRetryableProbeFailure(lastOutcome)) {
+	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		if (isProbeResult(lastOutcome)) {
+			return lastOutcome;
+		}
+
+		const canRetry =
+			attempt < maxAttempts && isRetryableProbeFailure(lastOutcome);
+		reportProbeFailure(lastOutcome, attempt, canRetry);
+
+		if (!canRetry) {
 			return lastOutcome;
 		}
 
