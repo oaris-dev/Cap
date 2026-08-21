@@ -293,3 +293,109 @@ describe("shouldFallbackToRawPlaybackSource", () => {
 		);
 	});
 });
+
+describe("resolvePlaybackSource transient failures", () => {
+	const noSleep = () => Promise.resolve();
+
+	it("retries a transient 503 and uses the MP4 source once it recovers", async () => {
+		const fetchImpl = vi
+			.fn<typeof fetch>()
+			.mockResolvedValueOnce(
+				createResponse("/api/playlist?videoType=mp4&_t=500", { status: 503 }),
+			)
+			.mockResolvedValueOnce(
+				createResponse("/api/playlist?videoType=mp4&_t=500", { status: 206 }),
+			);
+
+		const result = await resolvePlaybackSource({
+			videoSrc: "/api/playlist?videoType=mp4",
+			rawFallbackSrc: "/api/playlist?videoType=raw-preview",
+			fetchImpl,
+			now: () => 500,
+			sleepImpl: noSleep,
+		});
+
+		expect(fetchImpl).toHaveBeenCalledTimes(2);
+		expect(result).toEqual({
+			url: "/api/playlist?videoType=mp4&_t=500",
+			type: "mp4",
+			supportsCrossOrigin: false,
+		});
+	});
+
+	it("retries 429 responses up to the attempt limit", async () => {
+		const fetchImpl = vi
+			.fn<typeof fetch>()
+			.mockResolvedValue(
+				createResponse("https://cdn.example/video.mp4?_t=600", { status: 429 }),
+			);
+
+		await resolvePlaybackSource({
+			videoSrc: "https://cdn.example/video.mp4",
+			fetchImpl,
+			now: () => 600,
+			maxProbeAttempts: 3,
+			sleepImpl: noSleep,
+		});
+
+		expect(fetchImpl).toHaveBeenCalledTimes(3);
+	});
+
+	it("does not retry deterministic 404 responses", async () => {
+		const fetchImpl = vi
+			.fn<typeof fetch>()
+			.mockResolvedValue(
+				createResponse("https://cdn.example/video.mp4?_t=700", { status: 404 }),
+			);
+
+		const result = await resolvePlaybackSource({
+			videoSrc: "https://cdn.example/video.mp4",
+			fetchImpl,
+			now: () => 700,
+			sleepImpl: noSleep,
+		});
+
+		expect(fetchImpl).toHaveBeenCalledTimes(1);
+		expect(result).toBeNull();
+	});
+
+	it("plays a same-origin MP4 optimistically when retries exhaust on a transient status", async () => {
+		const fetchImpl = vi
+			.fn<typeof fetch>()
+			.mockResolvedValue(
+				createResponse("/api/playlist?videoType=mp4&_t=800", { status: 503 }),
+			);
+
+		const result = await resolvePlaybackSource({
+			videoSrc: "/api/playlist?videoType=mp4",
+			fetchImpl,
+			now: () => 800,
+			maxProbeAttempts: 2,
+			sleepImpl: noSleep,
+		});
+
+		expect(fetchImpl).toHaveBeenCalledTimes(2);
+		expect(result).toEqual({
+			url: "/api/playlist?videoType=mp4&_t=800",
+			type: "mp4",
+			supportsCrossOrigin: false,
+		});
+	});
+
+	it("still returns null for same-origin sources that fail deterministically", async () => {
+		const fetchImpl = vi
+			.fn<typeof fetch>()
+			.mockResolvedValue(
+				createResponse("/api/playlist?videoType=mp4&_t=900", { status: 404 }),
+			);
+
+		const result = await resolvePlaybackSource({
+			videoSrc: "/api/playlist?videoType=mp4",
+			fetchImpl,
+			now: () => 900,
+			sleepImpl: noSleep,
+		});
+
+		expect(result).toBeNull();
+	});
+});

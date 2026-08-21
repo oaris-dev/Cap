@@ -14,6 +14,7 @@ type ProbeResult = {
 type ProbeFailure = {
 	url: string;
 	reason: "network-error" | "unavailable";
+	status?: number;
 };
 
 type ProbeOutcome = ProbeFailure | ProbeResult;
@@ -26,7 +27,28 @@ type ResolvePlaybackSourceInput = {
 	now?: () => number;
 	createVideoElement?: () => Pick<HTMLVideoElement, "canPlayType">;
 	preferredSource?: "mp4" | "raw";
+	maxProbeAttempts?: number;
+	probeRetryDelayMs?: number;
+	sleepImpl?: (ms: number) => Promise<void>;
 };
+
+const DEFAULT_MAX_PROBE_ATTEMPTS = 3;
+const DEFAULT_PROBE_RETRY_DELAY_MS = 300;
+
+const defaultSleep = (ms: number) =>
+	new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function isRetryableProbeStatus(status: number): boolean {
+	return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function isRetryableProbeFailure(failure: ProbeFailure): boolean {
+	return (
+		failure.reason === "unavailable" &&
+		typeof failure.status === "number" &&
+		isRetryableProbeStatus(failure.status)
+	);
+}
 
 function appendCacheBust(url: string, timestamp: number): string {
 	return url.includes("?")
@@ -53,6 +75,28 @@ function isWebMContentType(contentType: string, url: string): boolean {
 	);
 }
 
+async function probePlaybackSourceWithRetry(
+	url: string,
+	fetchImpl: typeof fetch,
+	now: () => number,
+	maxAttempts: number,
+	retryDelayMs: number,
+	sleep: (ms: number) => Promise<void>,
+): Promise<ProbeOutcome> {
+	let lastOutcome = await probePlaybackSource(url, fetchImpl, now);
+
+	for (let attempt = 1; attempt < maxAttempts; attempt++) {
+		if (isProbeResult(lastOutcome) || !isRetryableProbeFailure(lastOutcome)) {
+			return lastOutcome;
+		}
+
+		await sleep(retryDelayMs * 2 ** (attempt - 1));
+		lastOutcome = await probePlaybackSource(url, fetchImpl, now);
+	}
+
+	return lastOutcome;
+}
+
 async function probePlaybackSource(
 	url: string,
 	fetchImpl: typeof fetch,
@@ -69,6 +113,7 @@ async function probePlaybackSource(
 			return {
 				url: requestUrl,
 				reason: "unavailable",
+				status: response.status,
 			};
 		}
 
@@ -136,13 +181,26 @@ export async function resolvePlaybackSource({
 	now = () => Date.now(),
 	createVideoElement,
 	preferredSource = "mp4",
+	maxProbeAttempts = DEFAULT_MAX_PROBE_ATTEMPTS,
+	probeRetryDelayMs = DEFAULT_PROBE_RETRY_DELAY_MS,
+	sleepImpl = defaultSleep,
 }: ResolvePlaybackSourceInput): Promise<ResolvedPlaybackSource | null> {
+	const probe = (url: string) =>
+		probePlaybackSourceWithRetry(
+			url,
+			fetchImpl,
+			now,
+			maxProbeAttempts,
+			probeRetryDelayMs,
+			sleepImpl,
+		);
+
 	const resolveRaw = async (): Promise<ResolvedPlaybackSource | null> => {
 		if (!rawFallbackSrc) {
 			return null;
 		}
 
-		const rawResult = await probePlaybackSource(rawFallbackSrc, fetchImpl, now);
+		const rawResult = await probe(rawFallbackSrc);
 
 		if (!isProbeResult(rawResult)) {
 			return null;
@@ -169,7 +227,7 @@ export async function resolvePlaybackSource({
 		return await resolveRaw();
 	}
 
-	const mp4Result = await probePlaybackSource(videoSrc, fetchImpl, now);
+	const mp4Result = await probe(videoSrc);
 
 	if (isProbeResult(mp4Result)) {
 		return {
@@ -181,7 +239,10 @@ export async function resolvePlaybackSource({
 		};
 	}
 
-	if (mp4Result.reason === "network-error" && canUseUnprobedSource(videoSrc)) {
+	const mp4FailureIsTransient =
+		mp4Result.reason === "network-error" || isRetryableProbeFailure(mp4Result);
+
+	if (mp4FailureIsTransient && canUseUnprobedSource(videoSrc)) {
 		return {
 			url: mp4Result.url,
 			type: "mp4",
