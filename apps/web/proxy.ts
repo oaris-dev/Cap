@@ -1,12 +1,11 @@
 import { db } from "@cap/database";
-import { encrypt } from "@cap/database/crypto";
 import { organizations, videos } from "@cap/database/schema";
 import { buildEnv, serverEnv } from "@cap/env";
 import type { Video } from "@cap/web-domain";
 import { eq } from "drizzle-orm";
 import { notFound } from "next/navigation";
 import { type NextRequest, NextResponse, userAgent } from "next/server";
-import { verifyEmbedToken } from "@/lib/embed-token";
+import { signEmbedToken, verifyEmbedToken } from "@/lib/embed-token";
 
 const addHttps = (s?: string) => {
 	if (!s) return s;
@@ -74,59 +73,45 @@ export async function proxy(request: NextRequest) {
 	if (path.startsWith("/embed/")) {
 		const videoIdMatch = path.match(/^\/embed\/([^/]+)/);
 		const videoId = videoIdMatch?.[1];
-		let encryptedPassword: string | null = null;
+		let mintedTokenUrl: URL | null = null;
 
 		if (videoId) {
-			let authenticated = false;
+			let hasValidToken = false;
 
 			const token = url.searchParams.get("token");
 			if (token && token.length > 0 && token.length < 2048) {
 				try {
 					const result = await verifyEmbedToken(token, videoId);
-					authenticated = result.valid;
+					hasValidToken = result.valid;
 				} catch (e) {
 					console.error("Embed token verification failed:", e);
 				}
 			}
 
-			if (!authenticated) {
-				authenticated = isFromAllowedEmbedOrigin(request);
-			}
-
-			if (authenticated) {
+			if (!hasValidToken && isFromAllowedEmbedOrigin(request)) {
 				try {
 					const [video] = await db()
 						.select({ password: videos.password })
 						.from(videos)
 						.where(eq(videos.id, videoId as Video.VideoId));
+
 					if (video?.password) {
-						encryptedPassword = await encrypt(video.password);
+						const mintedToken = await signEmbedToken(videoId, "24h");
+						mintedTokenUrl = new URL(url);
+						mintedTokenUrl.searchParams.set("token", mintedToken);
 					}
 				} catch (e) {
-					console.error("Embed password lookup failed:", e);
+					console.error("Embed token minting failed:", e);
 				}
 			}
 		}
 
-		if (encryptedPassword) {
-			request.cookies.set("x-cap-password", encryptedPassword);
-		}
-
-		const response = NextResponse.next({
-			request: { headers: request.headers },
-		});
+		const response = mintedTokenUrl
+			? NextResponse.rewrite(mintedTokenUrl)
+			: NextResponse.next();
 		response.headers.set("Access-Control-Allow-Origin", "*");
 		response.headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
 		response.headers.delete("X-Frame-Options");
-
-		if (encryptedPassword) {
-			response.cookies.set("x-cap-password", encryptedPassword, {
-				httpOnly: true,
-				secure: process.env.NODE_ENV === "production",
-				sameSite: "lax",
-				path: "/",
-			});
-		}
 
 		return response;
 	}
