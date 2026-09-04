@@ -8,6 +8,7 @@ import { provideOptionalAuth, VideosPolicy } from "@cap/web-backend";
 import { Policy, type Video } from "@cap/web-domain";
 import { eq } from "drizzle-orm";
 import { Effect, Exit } from "effect";
+import { isAiConfigured } from "@/lib/ai/provider";
 import {
 	isRetryableDesktopSegmentsFinalizationError,
 	queueDesktopSegmentsFinalization,
@@ -63,7 +64,9 @@ export async function getVideoStatus(
 
 	if (
 		!video.transcriptionStatus &&
-		(serverEnv().MISTRAL_API_KEY || serverEnv().DEEPGRAM_API_KEY)
+		(serverEnv().MISTRAL_API_KEY ||
+			serverEnv().DEEPGRAM_API_KEY ||
+			serverEnv().ASSEMBLY_API_KEY)
 	) {
 		const activeUpload = await db()
 			.select({
@@ -180,9 +183,7 @@ export async function getVideoStatus(
 		video.transcriptionStatus === "COMPLETE" &&
 		!metadata.aiGenerationStatus &&
 		!metadata.summary &&
-		(serverEnv().MISTRAL_API_KEY ||
-			serverEnv().GROQ_API_KEY ||
-			serverEnv().OPENAI_API_KEY);
+		isAiConfigured();
 
 	if (shouldTriggerAiGeneration) {
 		try {

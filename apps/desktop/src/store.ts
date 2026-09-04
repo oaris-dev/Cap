@@ -2,8 +2,14 @@ import { createQuery } from "@tanstack/solid-query";
 import { Store } from "@tauri-apps/plugin-store";
 import { onCleanup } from "solid-js";
 import type { AutomationsStore } from "~/utils/automations";
-import type { GeneralSettingsStore } from "~/utils/general-settings";
+import {
+	type GeneralSettingsStore,
+	RECORDING_START_SAFETY_DEFAULTS,
+	type RecordingStartSafetySettings,
+} from "~/utils/general-settings";
+import { createSerializedStore } from "~/utils/serialized-store";
 import type {
+	AnimatedGradientLibrary,
 	AuthStore,
 	HotkeysStore,
 	PresetsStore,
@@ -97,6 +103,22 @@ function declareStore<T extends object>(name: string, defaults?: T) {
 }
 
 export const presetsStore = declareStore<PresetsStore>("presets");
+const animatedGradientDefaults: AnimatedGradientLibrary = {
+	presets: [],
+	lastUsed: null,
+	selected: false,
+};
+const animatedGradientStore = declareStore<AnimatedGradientLibrary>(
+	"animated_gradients",
+	animatedGradientDefaults,
+);
+export const animatedGradientsStore = {
+	...animatedGradientStore,
+	...createSerializedStore<AnimatedGradientLibrary>(
+		animatedGradientStore,
+		animatedGradientDefaults,
+	),
+};
 export const authStore = declareStore<AuthStore>("auth");
 export const automationsStore = declareStore<AutomationsStore>("automations");
 export const userProfileStore = declareStore<UserProfileStore>("user_profile");
@@ -107,6 +129,11 @@ export const mainWindowUIStore = declareStore<MainWindowUIStore>(
 export const hotkeysStore = declareStore<HotkeysStore>("hotkeys");
 export const generalSettingsStore =
 	declareStore<GeneralSettingsStore>("general_settings");
+export const recordingStartSafetyStore =
+	declareStore<RecordingStartSafetySettings>(
+		"recording_start_safety",
+		RECORDING_START_SAFETY_DEFAULTS,
+	);
 export const recordingSettingsStore = declareStore<RecordingSettingsStore>(
 	"recording_settings",
 	{

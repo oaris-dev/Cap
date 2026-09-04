@@ -2,12 +2,13 @@
 
 import { db } from "@cap/database";
 import { videos } from "@cap/database/schema";
-import { serverEnv } from "@cap/env";
 import { provideOptionalAuth, Storage, VideosPolicy } from "@cap/web-backend";
 import { Policy, type Video } from "@cap/web-domain";
+import { generateText } from "ai";
 import { eq } from "drizzle-orm";
 import { Effect, Exit, Option } from "effect";
-import { GROQ_MODEL, getGroqClient } from "@/lib/groq-client";
+import { isAiConfigured } from "@/lib/ai/provider";
+import { runWithAiProviders } from "@/lib/ai/run";
 import { isRateLimited, RATE_LIMIT_IDS } from "@/lib/rate-limit";
 import * as EffectRuntime from "@/lib/server";
 import { runPromise } from "@/lib/server";
@@ -41,8 +42,7 @@ export async function translateTranscript(
 		};
 	}
 
-	const groq = getGroqClient();
-	if (!groq && !serverEnv().MISTRAL_API_KEY) {
+	if (!isAiConfigured()) {
 		return {
 			success: false,
 			message: "Translation service not configured",
@@ -110,7 +110,6 @@ export async function translateTranscript(
 	const translatedVtt = await translateVttContent(
 		originalVtt.value,
 		targetLanguage,
-		groq ?? undefined,
 	);
 
 	if (!translatedVtt) {
@@ -140,7 +139,6 @@ export async function translateTranscript(
 async function translateVttContent(
 	vttContent: string,
 	targetLanguage: LanguageCode,
-	groq?: NonNullable<ReturnType<typeof getGroqClient>>,
 ): Promise<string | null> {
 	const targetLanguageName = SUPPORTED_LANGUAGES[targetLanguage];
 
@@ -159,59 +157,25 @@ VTT content to translate:
 
 ${vttContent}`;
 
-	if (serverEnv().MISTRAL_API_KEY) {
-		try {
-			const res = await fetch("https://api.mistral.ai/v1/chat/completions", {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${serverEnv().MISTRAL_API_KEY}`,
-				},
-				body: JSON.stringify({
-					model: "mistral-small-latest",
-					messages: [{ role: "user", content: prompt }],
-					temperature: 0.3,
-					max_tokens: 8000,
-				}),
-			});
-			if (res.ok) {
-				const json = await res.json();
-				const content = json.choices?.[0]?.message?.content;
-				if (content?.includes("WEBVTT")) {
-					return content.trim();
-				}
-			} else {
-				console.error(
-					"[translateVttContent] Mistral translation non-ok response:",
-					res.status,
-					res.statusText,
-				);
-			}
-		} catch (error) {
-			console.error(
-				"[translateVttContent] Mistral translation error, trying fallback:",
-				error,
-			);
-		}
-	}
-
-	if (groq) {
-		try {
-			const response = await groq.chat.completions.create({
-				model: GROQ_MODEL,
-				messages: [{ role: "user", content: prompt }],
-				temperature: 0.3,
-				max_tokens: 8000,
+	try {
+		return await runWithAiProviders("generation", async (selection) => {
+			const response = await generateText({
+				model: selection.model(),
+				prompt,
+				maxOutputTokens: 8000,
+				...(selection.supportsTemperature ? { temperature: 0.3 } : {}),
 			});
 
-			const content = response.choices[0]?.message?.content;
-			if (content?.includes("WEBVTT")) {
-				return content.trim();
+			// Validate inside the provider loop so a fulfilled response that
+			// dropped the WEBVTT header falls through to the next provider.
+			if (!response.text.includes("WEBVTT")) {
+				throw new Error("translation response did not contain WEBVTT");
 			}
-		} catch (error) {
-			console.error("[translateVttContent] Groq translation error:", error);
-		}
-	}
 
-	return null;
+			return response.text.trim();
+		});
+	} catch (error) {
+		console.error("[translateVttContent] Translation error:", error);
+		return null;
+	}
 }
