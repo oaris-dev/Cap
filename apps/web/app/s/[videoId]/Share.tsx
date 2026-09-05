@@ -213,6 +213,12 @@ interface ShareProps {
 	 * view is active.
 	 */
 	header?: React.ReactNode;
+	/**
+	 * Rendered at the bottom of the scrolling video column. Desktop pins the
+	 * page to the viewport, so a page-level footer under `Share` would be
+	 * clipped — this rides along with the column that actually scrolls.
+	 */
+	footer?: React.ReactNode;
 }
 
 const useVideoStatus = (
@@ -335,6 +341,7 @@ export const Share = ({
 	canRecordMedia = false,
 	viewerSignedIn = false,
 	header,
+	footer,
 }: ShareProps) => {
 	const isScreenshot = data.isScreenshot === true;
 	// Memoized: a fresh Date each render would defeat the memoized `data`
@@ -1127,6 +1134,11 @@ export const Share = ({
 									</AnimatePresence>
 								</div>
 							</div>
+
+							{/* Desktop only: below `lg` the rail is stacked after this
+							    column, and a footer here would sit between the video and
+							    the comments. The phone copy renders after the rail. */}
+							{footer && <div className="hidden lg:block">{footer}</div>}
 						</div>
 					</div>
 
@@ -1193,6 +1205,10 @@ export const Share = ({
 							<ChevronGlyph direction="left" />
 						</button>
 					)}
+
+					{/* The phone copy of the footer: last in the stack, after the
+					    rail, where a page footer belongs. */}
+					{footer && <div className="px-4 lg:hidden">{footer}</div>}
 				</div>
 			</PlaybackProvider>
 		</CaptionProvider>

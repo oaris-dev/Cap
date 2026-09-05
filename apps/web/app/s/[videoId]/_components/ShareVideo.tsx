@@ -678,6 +678,7 @@ export const ShareVideo = forwardRef<
 						<button
 							type="button"
 							className="block"
+							aria-label="Remove watermark"
 							onClick={(e) => {
 								e.stopPropagation();
 								openUpgradeModal();
@@ -688,7 +689,10 @@ export const ShareVideo = forwardRef<
 						>
 							<div className="relative">
 								<div className="opacity-50 transition-opacity hover:opacity-100 peer">
-									<OarisLogo className="w-auto h-4 sm:h-8 text-white" />
+									<OarisLogo
+										className="w-auto h-4 sm:h-8 text-white"
+										label={null}
+									/>
 								</div>
 
 								<div className="absolute left-0 top-8 transition-transform duration-300 ease-in-out origin-top scale-y-0 peer-hover:scale-y-100">

@@ -254,15 +254,21 @@ export const Sidebar = forwardRef<{ scrollToBottom: () => void }, SidebarProps>(
 									onClick={() => paginate(tab.id as TabType)}
 									onPointerEnter={() => prefetchTab(tab.id)}
 									onFocus={() => prefetchTab(tab.id)}
+									// Fork: German runs far longer than English
+									// ("Zusammenfassung" vs "Summary") and overflowed an equal
+									// `flex-1` third of the rail, so the labels collided. The
+									// phone card is wide enough to keep thirds; the desktop
+									// rail sizes each tab to its own label instead. min-w-0 +
+									// truncate makes a collision impossible either way.
 									className={classNames(
-										"flex-1 px-5 py-3 text-sm font-medium relative transition-colors duration-200",
+										"flex-1 min-w-0 lg:flex-initial px-3 py-3 text-sm font-medium relative transition-colors duration-200",
 										"hover:bg-gray-1",
 										activeTab === tab.id ? "bg-gray-3" : "",
 									)}
 								>
 									<span
 										className={classNames(
-											"relative z-10 text-sm",
+											"relative z-10 block truncate text-[13px]",
 											activeTab === tab.id ? "text-gray-12" : "text-gray-9",
 										)}
 									>
@@ -288,7 +294,7 @@ export const Sidebar = forwardRef<{ scrollToBottom: () => void }, SidebarProps>(
 								onClick={onCollapse}
 								aria-label="Hide comments"
 								title="Hide comments"
-								className="hidden shrink-0 items-center justify-center px-3 text-gray-9 transition-colors hover:bg-gray-1 hover:text-gray-12 lg:flex"
+								className="hidden ml-auto shrink-0 items-center justify-center px-3 text-gray-9 transition-colors hover:bg-gray-1 hover:text-gray-12 lg:flex"
 							>
 								<svg
 									viewBox="0 0 16 16"
