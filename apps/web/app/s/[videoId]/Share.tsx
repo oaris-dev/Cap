@@ -1135,7 +1135,10 @@ export const Share = ({
 								</div>
 							</div>
 
-							{footer}
+							{/* Desktop only: below `lg` the rail is stacked after this
+							    column, and a footer here would sit between the video and
+							    the comments. The phone copy renders after the rail. */}
+							{footer && <div className="hidden lg:block">{footer}</div>}
 						</div>
 					</div>
 
@@ -1202,6 +1205,10 @@ export const Share = ({
 							<ChevronGlyph direction="left" />
 						</button>
 					)}
+
+					{/* The phone copy of the footer: last in the stack, after the
+					    rail, where a page footer belongs. */}
+					{footer && <div className="px-4 lg:hidden">{footer}</div>}
 				</div>
 			</PlaybackProvider>
 		</CaptionProvider>
