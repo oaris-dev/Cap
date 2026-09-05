@@ -292,8 +292,8 @@ export const Sidebar = forwardRef<{ scrollToBottom: () => void }, SidebarProps>(
 							<button
 								type="button"
 								onClick={onCollapse}
-								aria-label="Hide comments"
-								title="Hide comments"
+								aria-label={t("sidebar.hideComments")}
+								title={t("sidebar.hideComments")}
 								className="hidden ml-auto shrink-0 items-center justify-center px-3 text-gray-9 transition-colors hover:bg-gray-1 hover:text-gray-12 lg:flex"
 							>
 								<svg
@@ -301,7 +301,7 @@ export const Sidebar = forwardRef<{ scrollToBottom: () => void }, SidebarProps>(
 									className="size-4 fill-current"
 									aria-hidden
 								>
-									<title>Hide comments</title>
+									<title>{t("sidebar.hideComments")}</title>
 									<path d="M5.7 3.3a.6.6 0 0 0 0 .85L9.55 8 5.7 11.85a.6.6 0 1 0 .85.85l4.27-4.27a.6.6 0 0 0 0-.86L6.55 3.3a.6.6 0 0 0-.85 0Z" />
 								</svg>
 							</button>

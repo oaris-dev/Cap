@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import { useCallback, useState } from "react";
 import { useCurrentUser } from "@/app/Layout/AuthContext";
 import { SignedImageUrl } from "@/components/SignedImageUrl";
+import { t, tParam } from "@/lib/translations";
 import type { CommentType } from "../../../Share";
 import { RecordActionButtons } from "../../media-comment/record-actions";
 import { useOptionalPlayback } from "../../playback/PlaybackContext";
@@ -75,15 +76,17 @@ export function ActivityComposer({
 			>
 				<span className="flex justify-center items-center rounded-full size-7 shrink-0 bg-gray-4 text-gray-10">
 					<svg viewBox="0 0 16 16" className="size-4 fill-current" aria-hidden>
-						<title>Viewer</title>
+						<title>{t("activity.viewer")}</title>
 						<path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm0 1.2c-2.6 0-4.8 1.5-4.8 3.3 0 .6.5 1 1.1 1h7.4c.6 0 1.1-.4 1.1-1 0-1.8-2.2-3.3-4.8-3.3Z" />
 					</svg>
 				</span>
 				<span className="flex-1 text-sm truncate text-gray-8">
-					{ownerName ? `Respond to ${ownerName}...` : "Leave a comment"}
+					{ownerName
+						? tParam("activity.respondTo", { name: ownerName })
+						: t("activity.leaveComment")}
 				</span>
 				<span className="text-xs font-medium shrink-0 text-blue-9">
-					Sign in
+					{t("activity.signIn")}
 				</span>
 			</button>
 		);
@@ -96,9 +99,11 @@ export function ActivityComposer({
 				onSubmit={onSubmit}
 				disabled={disabled}
 				placeholder={
-					ownerName ? `Respond to ${ownerName}...` : "Leave a comment"
+					ownerName
+						? tParam("activity.respondTo", { name: ownerName })
+						: t("activity.leaveComment")
 				}
-				buttonLabel="Comment"
+				buttonLabel={t("toolbar.comment")}
 				avatar={
 					<SignedImageUrl
 						image={user.imageUrl}

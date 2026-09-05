@@ -7,6 +7,8 @@
  * out what that means for the link.
  */
 
+import { t, tParam } from "@/lib/translations";
+
 export type ShareAudienceKind = "public" | "spaces" | "private";
 
 export interface ShareAudience {
@@ -28,14 +30,24 @@ export interface ShareAudienceInput {
 }
 
 const listNames = (names: string[], total: number): string => {
-	if (names.length === 1 && total === 1) return `Shared with ${names[0]}`;
+	if (names.length === 1 && total === 1)
+		return tParam("audience.sharedWithOne", { name: names[0] as string });
 	if (names.length === 2 && total === 2)
-		return `Shared with ${names[0]} and ${names[1]}`;
+		return tParam("audience.sharedWithTwo", {
+			first: names[0] as string,
+			second: names[1] as string,
+		});
 	if (names.length >= 1)
-		return `Shared with ${names[0]} and ${total - 1} ${
-			total - 1 === 1 ? "other" : "others"
-		}`;
-	return `Shared with ${total} ${total === 1 ? "space" : "spaces"}`;
+		return tParam(
+			total - 1 === 1
+				? "audience.sharedWithOneAndOther"
+				: "audience.sharedWithOneAndOthers",
+			{ name: names[0] as string, count: total - 1 },
+		);
+	return tParam(
+		total === 1 ? "audience.sharedWithSpace" : "audience.sharedWithSpaces",
+		{ count: total },
+	);
 };
 
 export const describeShareAudience = ({
@@ -47,11 +59,11 @@ export const describeShareAudience = ({
 		return {
 			kind: "public",
 			label: passwordProtected
-				? "Anyone with the password"
-				: "Anyone with the link",
+				? t("audience.publicWithPassword")
+				: t("audience.public"),
 			tooltip: passwordProtected
-				? "Anyone who has this link and the password can watch this Cap."
-				: "Anyone who has this link can watch this Cap, including people outside your organization.",
+				? t("audience.publicWithPasswordTooltip")
+				: t("audience.publicTooltip"),
 		};
 	}
 
@@ -67,17 +79,19 @@ export const describeShareAudience = ({
 			kind: "spaces",
 			label: listNames(listed, total),
 			tooltip: listed.length
-				? `Only members of ${listed.join(", ")}${
-						remainder > 0 ? ` and ${remainder} more` : ""
-					} can watch this Cap. The link won't work for anyone else.`
-				: "Only members of the spaces this is shared with can watch this Cap. The link won't work for anyone else.",
+				? remainder > 0
+					? tParam("audience.spacesTooltipMore", {
+							names: listed.join(", "),
+							count: remainder,
+						})
+					: tParam("audience.spacesTooltip", { names: listed.join(", ") })
+				: t("audience.spacesTooltipUnnamed"),
 		};
 	}
 
 	return {
 		kind: "private",
-		label: "Only you",
-		tooltip:
-			"Nobody else can watch this Cap yet. Click to share it with a space or turn on the public link.",
+		label: t("audience.private"),
+		tooltip: t("audience.privateTooltip"),
 	};
 };

@@ -44,7 +44,7 @@ const CommentGlyph = () => (
 		strokeLinejoin="round"
 		aria-hidden
 	>
-		<title>No comments yet</title>
+		<title>{t("activity.noComments")}</title>
 		<path d="M5 8.5A2.5 2.5 0 0 1 7.5 6h17A2.5 2.5 0 0 1 27 8.5v11a2.5 2.5 0 0 1-2.5 2.5H14l-6 4.5V22H7.5A2.5 2.5 0 0 1 5 19.5v-11Z" />
 		<path d="M11 11.5h10M11 16h6" />
 	</svg>
