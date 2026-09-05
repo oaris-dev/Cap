@@ -3,7 +3,7 @@ import {
 	AI_GENERATION_LANGUAGE_AUTO,
 	type AiGenerationLanguage,
 } from "@cap/web-domain";
-import { formatTimestamp } from "@/lib/transcribe-utils";
+import type { AssemblyAIWord } from "@/lib/transcribe-utils";
 
 interface VoxtralSegment {
 	text: string;
@@ -29,7 +29,7 @@ interface VoxtralResponse {
 export async function transcribeWithVoxtral(
 	audioData: Buffer,
 	language: AiGenerationLanguage = AI_GENERATION_LANGUAGE_AUTO,
-): Promise<string | null> {
+): Promise<AssemblyAIWord[] | null> {
 	const apiKey = serverEnv().MISTRAL_API_KEY;
 	if (!apiKey) return null;
 
@@ -72,7 +72,7 @@ export async function transcribeWithVoxtral(
 			return null;
 		}
 
-		return voxtralToWebVTT(result.segments);
+		return voxtralSegmentsToWords(result.segments);
 	} catch (error) {
 		console.error(
 			"[transcribeWithVoxtral] Unexpected error:",
@@ -82,59 +82,24 @@ export async function transcribeWithVoxtral(
 	}
 }
 
-function voxtralToWebVTT(segments: VoxtralSegment[]): string {
-	let output = "WEBVTT\n\n";
-	let captionIndex = 1;
+// Voxtral reports segment offsets in seconds; every downstream consumer
+// (caption VTT, edit transcript) works in milliseconds.
+function voxtralSegmentsToWords(segments: VoxtralSegment[]): AssemblyAIWord[] {
+	const words: AssemblyAIWord[] = [];
 
-	let group: string[] = [];
-	let groupStart = segments[0]?.start ?? 0;
-	let wordCount = 0;
-
-	for (let i = 0; i < segments.length; i++) {
-		const segment = segments[i];
-		if (!segment) continue;
-
-		const word = segment.text.trim();
-		if (!word) continue;
-
-		if (group.length === 0) {
-			groupStart = segment.start;
+	for (const segment of segments) {
+		const text = segment.text.trim();
+		if (!text) continue;
+		if (!Number.isFinite(segment.start) || !Number.isFinite(segment.end)) {
+			continue;
 		}
 
-		group.push(word);
-		wordCount++;
-
-		const nextSegment = segments[i + 1];
-		const shouldBreak =
-			word.endsWith(",") ||
-			word.endsWith(".") ||
-			word.endsWith("!") ||
-			word.endsWith("?") ||
-			(nextSegment && nextSegment.start - segment.end > 0.5) ||
-			wordCount === 8;
-
-		if (shouldBreak) {
-			const start = formatTimestamp(groupStart);
-			const end = formatTimestamp(segment.end);
-			const groupText = group.join(" ");
-
-			output += `${captionIndex}\n${start} --> ${end}\n${groupText}\n\n`;
-			captionIndex++;
-
-			group = [];
-			wordCount = 0;
-		}
+		words.push({
+			text,
+			start: Math.round(segment.start * 1000),
+			end: Math.round(segment.end * 1000),
+		});
 	}
 
-	if (group.length > 0) {
-		const lastSegment = segments[segments.length - 1];
-		if (lastSegment) {
-			const start = formatTimestamp(groupStart);
-			const end = formatTimestamp(lastSegment.end);
-			const groupText = group.join(" ");
-			output += `${captionIndex}\n${start} --> ${end}\n${groupText}\n\n`;
-		}
-	}
-
-	return output;
+	return words;
 }

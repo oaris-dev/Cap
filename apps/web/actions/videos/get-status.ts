@@ -8,12 +8,14 @@ import { provideOptionalAuth, VideosPolicy } from "@cap/web-backend";
 import { Policy, type Video } from "@cap/web-domain";
 import { eq } from "drizzle-orm";
 import { Effect, Exit } from "effect";
+import { isAiConfigured } from "@/lib/ai/provider";
 import {
 	isRetryableDesktopSegmentsFinalizationError,
 	queueDesktopSegmentsFinalization,
 } from "@/lib/desktop-segments-finalization";
 import { startAiGeneration } from "@/lib/generate-ai";
 import * as EffectRuntime from "@/lib/server";
+import { isTranscriptionConfigured } from "@/lib/transcription-providers";
 import { transcribeVideo } from "../../lib/transcribe";
 import { isAiGenerationEnabled } from "../../utils/flags";
 
@@ -61,10 +63,7 @@ export async function getVideoStatus(
 
 	const metadata: VideoMetadata = (video.metadata as VideoMetadata) || {};
 
-	if (
-		!video.transcriptionStatus &&
-		(serverEnv().MISTRAL_API_KEY || serverEnv().DEEPGRAM_API_KEY)
-	) {
+	if (!video.transcriptionStatus && isTranscriptionConfigured()) {
 		const activeUpload = await db()
 			.select({
 				videoId: videoUploads.videoId,
@@ -180,9 +179,7 @@ export async function getVideoStatus(
 		video.transcriptionStatus === "COMPLETE" &&
 		!metadata.aiGenerationStatus &&
 		!metadata.summary &&
-		(serverEnv().MISTRAL_API_KEY ||
-			serverEnv().GROQ_API_KEY ||
-			serverEnv().OPENAI_API_KEY);
+		isAiConfigured();
 
 	if (shouldTriggerAiGeneration) {
 		try {

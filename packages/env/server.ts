@@ -110,15 +110,46 @@ function createServerEnv() {
 				.string()
 				.optional()
 				.describe("Mistral API URL. Defaults to https://api.mistral.ai"),
+			ASSEMBLY_API_KEY: z.string().optional().describe("Audio transcription"),
 			ANTHROPIC_API_KEY: z.string().optional().describe("AI chat"),
 			OPENAI_API_KEY: z.string().optional().describe("AI summaries"),
 			GROQ_API_KEY: z.string().optional().describe("AI summaries"),
-			AI_RESPONSE_LANGUAGE: z
+			AI_PROVIDER: z
+				.union([
+					z.literal("assemblyai"),
+					z.literal("openai"),
+					z.literal("anthropic"),
+					z.literal("groq"),
+					z.literal("openai-compatible"),
+				])
+				.optional()
+				.describe(
+					"Preferred LLM provider. When unset, providers are auto-detected from the API keys above ('assemblyai' is never auto-detected and must be opted into explicitly).",
+				),
+			AI_MODEL: z
 				.string()
 				.optional()
 				.describe(
-					"Language for AI-generated summaries, titles, and chapters (e.g., 'de', 'fr', 'en'). Defaults to English if unset.",
+					"Model for AI generation (titles, summaries, chapters, transcript translation). Required for 'openai-compatible'; overrides the provider default otherwise.",
 				),
+			AI_CHAT_MODEL: z
+				.string()
+				.optional()
+				.describe("Model for AI chat (the support messenger)"),
+			AI_STREAM_MODEL: z
+				.string()
+				.optional()
+				.describe("Model for streaming AI chat (docs Ask AI)"),
+			AI_BASE_URL: z
+				.string()
+				.optional()
+				.describe(
+					"Base URL for the 'openai-compatible' provider (eg. Ollama, OpenRouter, LM Studio), or an alternative AssemblyAI LLM gateway (eg. the EU gateway)",
+				),
+			AI_API_KEY: z
+				.string()
+				.optional()
+				.describe("API key for the 'openai-compatible' provider"),
 			REPLICATE_API_TOKEN: z
 				.string()
 				.optional()
@@ -129,9 +160,13 @@ function createServerEnv() {
 			/// Cap Cloud
 			// These are only needed for Cap Cloud (https://cap.so)
 			STRIPE_SECRET_KEY: z.string().optional(),
+			STRIPE_SAML_SSO_PRICE_ID: z.string().optional(),
 			STRIPE_WEBHOOK_SECRET: z.string().optional(),
 			DISCORD_FEEDBACK_WEBHOOK_URL: z.string().optional(),
 			DISCORD_LOGS_WEBHOOK_URL: z.string().optional(),
+			SLACK_CLIENT_ID: z.string().optional(),
+			SLACK_CLIENT_SECRET: z.string().optional(),
+			SLACK_SIGNING_SECRET: z.string().optional(),
 
 			/// Tinybird analytics
 			TINYBIRD_HOST: z.string().optional(),
@@ -150,7 +185,7 @@ function createServerEnv() {
 			VERCEL_BRANCH_URL_HOST: z.string().optional(),
 			VERCEL_PROJECT_PRODUCTION_URL_HOST: z.string().optional(),
 			VERCEL_AWS_ROLE_ARN: z.string().optional(),
-			POSTHOG_PERSONAL_API_KEY: z.string().optional(),
+			OPENPANEL_CLIENT_SECRET: z.string().optional(),
 			DUB_API_KEY: z.string().optional(),
 
 			/// Media Server

@@ -1,4 +1,6 @@
 import "@/app/globals.css";
+import { buildEnv } from "@cap/env";
+import { OpenPanelComponent } from "@openpanel/nextjs";
 import type { Metadata } from "next";
 import { League_Spartan, Lexend } from "next/font/google";
 import localFont from "next/font/local";
@@ -85,10 +87,14 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: PropsWithChildren) {
 	return (
+		// suppressHydrationWarning: the Cap Chrome extension stamps
+		// data-cap-chrome-extension-installed on <html> at document_idle,
+		// which can land before hydration finishes.
 		<html
 			className={`${defaultFont.className} ${leagueSpartan.variable} ${lexend.variable}`}
 			lang={process.env.NEXT_PUBLIC_UI_LANGUAGE || "en"}
 			data-ui-lang={process.env.NEXT_PUBLIC_UI_LANGUAGE || "en"}
+			suppressHydrationWarning
 		>
 			<head>
 				<link
@@ -116,6 +122,15 @@ export default function RootLayout({ children }: PropsWithChildren) {
 			</head>
 			<body suppressHydrationWarning>
 				<Script src="/theme-script.js" strategy="beforeInteractive" />
+				{buildEnv.NEXT_PUBLIC_OPENPANEL_CLIENT_ID ? (
+					<OpenPanelComponent
+						apiUrl="/api/op"
+						clientId={buildEnv.NEXT_PUBLIC_OPENPANEL_CLIENT_ID}
+						scriptUrl="/api/op/op1.js"
+						trackOutgoingLinks
+						trackScreenViews
+					/>
+				) : null}
 				<main className="w-full">{children}</main>
 			</body>
 		</html>

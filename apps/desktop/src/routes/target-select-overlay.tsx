@@ -1,9 +1,10 @@
 import { Button } from "@cap/ui-solid";
+import { Popover } from "@kobalte/core/popover";
 import { createEventListener } from "@solid-primitives/event-listener";
 import { createElementSize } from "@solid-primitives/resize-observer";
 import { makePersisted } from "@solid-primitives/storage";
 import { useSearchParams } from "@solidjs/router";
-import { createMutation, useQuery } from "@tanstack/solid-query";
+import { useQuery } from "@tanstack/solid-query";
 import {
 	LogicalPosition,
 	type PhysicalPosition,
@@ -57,7 +58,11 @@ import {
 } from "~/components/Cropper";
 import ModeSelect from "~/components/ModeSelect";
 import SelectionHint from "~/components/selection-hint";
-import { authStore, generalSettingsStore } from "~/store";
+import {
+	authStore,
+	generalSettingsStore,
+	recordingStartSafetyStore,
+} from "~/store";
 import {
 	AREA_SELECTION_STORAGE_KEY,
 	AREA_SELECTION_STORAGE_SYNC,
@@ -70,11 +75,14 @@ import {
 } from "~/utils/area-selection";
 import { getCameraWindow } from "~/utils/camera-window";
 import { createDevicesQuery } from "~/utils/devices";
+import { shouldConfirmRecordingWithoutMicrophone } from "~/utils/general-settings";
 import {
 	createCameraMutation,
+	createMicrophoneMutation,
 	createOptionsQuery,
 	createOrganizationsQuery,
 } from "~/utils/queries";
+import { createRecordingMenuPopup } from "~/utils/recording-menu";
 import {
 	type CanvasControls,
 	createImageDataWS,
@@ -688,8 +696,12 @@ function Inner() {
 												onRecordingStart={() => {
 													setOriginalCameraBounds(null);
 													if (options.mode === "screenshot") {
-														// The window variant has always dismissed the picker
-														// for screenshots too; keep that, tagged as such.
+														// Only mark the dismissal here. takeScreenshot is
+														// invoked from THIS webview right after, and closing
+														// destroys the webview before the invoke is dispatched,
+														// so the screenshot silently never happens. The start
+														// handler hides these windows and closes them once the
+														// capture is done.
 														if (options.targetModeSource === "editor") {
 															setOptions({
 																targetMode: null,
@@ -702,7 +714,6 @@ function Inner() {
 																targetModeDismissal: "screenshot",
 															});
 														}
-														commands.closeTargetSelectOverlays();
 													} else {
 														dismissPickerForRecordingStart();
 													}
@@ -1859,22 +1870,29 @@ function RecordingControls(props: {
 	const { setOptions, rawOptions } = useRecordingOptions();
 
 	const generalSetings = generalSettingsStore.createQuery();
+	const recordingStartSafety = recordingStartSafetyStore.createQuery();
 	const devices = createDevicesQuery();
+	const [noMicrophoneWarningOpen, setNoMicrophoneWarningOpen] =
+		createSignal(false);
+	const [dontShowMicrophoneWarning, setDontShowMicrophoneWarning] =
+		createSignal(false);
+	const [confirmingWithoutMicrophone, setConfirmingWithoutMicrophone] =
+		createSignal(false);
+	let microphoneConfirmationRevision = 0;
+	let controlsDisposed = false;
+	onCleanup(() => {
+		controlsDisposed = true;
+		microphoneConfirmationRevision += 1;
+	});
+	const dismissMicrophoneWarning = () => {
+		microphoneConfirmationRevision += 1;
+		setConfirmingWithoutMicrophone(false);
+		setNoMicrophoneWarningOpen(false);
+	};
 	const cameras = createMemo(() => devices.data?.cameras ?? []);
 	const mics = createMemo(() => devices.data?.microphones ?? []);
 	const permissions = createMemo(() => devices.data?.permissions);
-	const setMicInput = createMutation(() => ({
-		mutationFn: async (name: string | null) => {
-			const previous = rawOptions.micName ?? null;
-			if (previous !== name) setOptions("micName", name);
-			try {
-				await commands.setMicInput(name);
-			} catch (error) {
-				if (previous !== name) setOptions("micName", previous);
-				throw error;
-			}
-		},
-	}));
+	const setMicInput = createMicrophoneMutation();
 	const setCamera = createCameraMutation();
 
 	onMount(async () => {
@@ -1911,6 +1929,207 @@ function RecordingControls(props: {
 		if (!rawOptions.micName) return null;
 		return mics().find((name) => name === rawOptions.micName) ?? null;
 	});
+	const microphoneConfirmationContext = createMemo(() =>
+		JSON.stringify({
+			target: props.target,
+			mode: rawOptions.mode,
+			microphone: rawOptions.micName,
+			selectedMicrophone: selectedMicName(),
+			camera: rawOptions.cameraID,
+			cameraAvailable: selectedCamera() !== null,
+			systemAudio: rawOptions.captureSystemAudio,
+			targetModeSource: rawOptions.targetModeSource,
+			organizationId: rawOptions.organizationId,
+		}),
+	);
+	let previousConfirmationContext = microphoneConfirmationContext();
+	createEffect(() => {
+		const context = microphoneConfirmationContext();
+		if (context !== previousConfirmationContext) {
+			previousConfirmationContext = context;
+			dismissMicrophoneWarning();
+		}
+	});
+
+	createEffect(() => {
+		if (
+			!shouldConfirmRecordingWithoutMicrophone(
+				rawOptions.mode,
+				recordingStartSafety.data?.confirmBeforeRecordingWithoutMicrophone ??
+					true,
+				selectedMicName(),
+			)
+		) {
+			setNoMicrophoneWarningOpen(false);
+		}
+	});
+
+	const startLoading = () =>
+		devices.isPending ||
+		recordingStartSafety.isPending ||
+		setMicInput.isPending ||
+		setCamera.isPending;
+	const startDisabled = () => !!props.disabled || startLoading();
+
+	const startRecording = async (confirmedWithoutMicrophone = false) => {
+		if (confirmingWithoutMicrophone() && !confirmedWithoutMicrophone) return;
+		if (rawOptions.mode === "instant" && !auth.data) {
+			emit("start-sign-in");
+			return;
+		}
+		if (startDisabled()) return;
+
+		if (
+			!confirmedWithoutMicrophone &&
+			shouldConfirmRecordingWithoutMicrophone(
+				rawOptions.mode,
+				recordingStartSafety.data?.confirmBeforeRecordingWithoutMicrophone ??
+					true,
+				selectedMicName(),
+			)
+		) {
+			setNoMicrophoneWarningOpen(true);
+			return;
+		}
+
+		setNoMicrophoneWarningOpen(false);
+
+		// Snapshot before onRecordingStart: dismissing the picker
+		// (targetMode: null) disposes the <Match> branch that owns
+		// this component, and the display/area target props call its
+		// narrowed accessor — reading props.target afterwards throws
+		// "Stale read from <Match>." and the recording never starts.
+		const target = props.target;
+
+		if (target.variant === "area") {
+			setOptions(
+				"captureTarget",
+				reconcile({
+					variant: "area",
+					screen: target.screen,
+					bounds: {
+						position: {
+							x: target.bounds.position.x,
+							y: target.bounds.position.y,
+						},
+						size: {
+							width: target.bounds.size.width,
+							height: target.bounds.size.height,
+						},
+					},
+				}),
+			);
+		}
+
+		props.onRecordingStart?.();
+
+		if (rawOptions.mode === "screenshot") {
+			try {
+				const allWindows = await WebviewWindow.getAll();
+				for (const win of allWindows) {
+					if (win.label.startsWith("target-select-overlay-")) {
+						await win.setIgnoreCursorEvents(true);
+						await win.hide();
+					}
+				}
+
+				const path = await commands.takeScreenshot(target);
+				const shouldOpenEditor =
+					await commands.automationShouldOpenScreenshotEditor(target);
+				if (shouldOpenEditor) {
+					await commands.showWindow({ ScreenshotEditor: { path } });
+				}
+			} catch (e) {
+				const message = e instanceof Error ? e.message : String(e);
+				toast.error(`Failed to take screenshot: ${message}`);
+				console.error("Failed to take screenshot", e);
+			} finally {
+				await commands
+					.closeTargetSelectOverlays()
+					.catch((e) =>
+						console.error("Failed to close target select overlays", e),
+					);
+			}
+			return;
+		}
+
+		commands
+			.startRecording({
+				capture_target: target,
+				mode: rawOptions.mode,
+				capture_system_audio: rawOptions.captureSystemAudio,
+			})
+			.then((action) => {
+				// On success the backend closes the overlay windows; the
+				// non-Started actions leave our hidden windows behind.
+				// User-facing feedback for them arrives via the backend's
+				// StartFailed event in the main window.
+				if (action !== "Started") void commands.closeTargetSelectOverlays();
+			})
+			.catch((e: unknown) => {
+				const msg = e instanceof Error ? e.message : String(e);
+				// This webview is hidden by now, so the toast is a
+				// best-effort extra — the visible feedback comes from the
+				// backend's StartFailed event toasted in the main window.
+				if (
+					msg.includes("no longer available") ||
+					msg.includes("DeviceNotFound")
+				) {
+					toast.error(
+						"Selected microphone is not available. Please select a different microphone in settings.",
+					);
+				} else {
+					toast.error(`Failed to start recording: ${msg}`);
+				}
+				// An IPC-level rejection never reaches the backend, so no
+				// StartFailed event fires; the picker flow hid the main
+				// window and dismissal closed the overlays — without this,
+				// the whole app visually vanishes with no recording.
+				void commands.showWindow({
+					Main: { init_target_mode: null },
+				});
+				void commands.closeTargetSelectOverlays();
+			});
+	};
+
+	const confirmWithoutMicrophone = async () => {
+		if (startDisabled() || confirmingWithoutMicrophone()) return;
+		const revision = ++microphoneConfirmationRevision;
+		const context = microphoneConfirmationContext();
+		setConfirmingWithoutMicrophone(true);
+		if (dontShowMicrophoneWarning()) {
+			try {
+				await recordingStartSafetyStore.set({
+					confirmBeforeRecordingWithoutMicrophone: false,
+				});
+			} catch {
+				if (controlsDisposed || revision !== microphoneConfirmationRevision)
+					return;
+				setConfirmingWithoutMicrophone(false);
+				toast.error(
+					"Could not save your preference. Try again or leave the box unchecked.",
+				);
+				return;
+			}
+		}
+		if (
+			controlsDisposed ||
+			revision !== microphoneConfirmationRevision ||
+			context !== microphoneConfirmationContext()
+		) {
+			if (!controlsDisposed && revision === microphoneConfirmationRevision) {
+				dismissMicrophoneWarning();
+			}
+			return;
+		}
+		try {
+			await startRecording(true);
+		} finally {
+			if (!controlsDisposed && revision === microphoneConfirmationRevision) {
+				setConfirmingWithoutMicrophone(false);
+			}
+		}
+	};
 
 	const menuModes = async () =>
 		await Menu.new({
@@ -1979,13 +2198,16 @@ function RecordingControls(props: {
 		});
 	};
 
-	function showMenu(menu: Promise<Menu>, e: UIEvent) {
-		e.stopPropagation();
-		const rect = (e.target as HTMLDivElement).getBoundingClientRect();
-		menu.then((menu) => menu.popup(new LogicalPosition(rect.x, rect.y + 40)));
-	}
+	const popupRecordingMenu = createRecordingMenuPopup();
 
-	const startDisabled = () => !!props.disabled;
+	function showMenu(createMenu: () => Promise<Menu>, e: UIEvent) {
+		e.stopPropagation();
+		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		void popupRecordingMenu(
+			createMenu,
+			new LogicalPosition(rect.x, rect.y + 40),
+		).catch(() => toast.error("Could not open recording menu"));
+	}
 
 	return (
 		<>
@@ -2009,161 +2231,117 @@ function RecordingControls(props: {
 						>
 							<IconCapX class="invert will-change-transform size-3 dark:invert-0" />
 						</div>
-						<div
-							data-inactive={rawOptions.mode === "instant" && !auth.data}
-							data-disabled={startDisabled()}
-							class="flex flex-1 min-w-0 max-w-[18rem] overflow-hidden flex-row h-11 rounded-full text-white bg-linear-to-r from-blue-10 via-blue-10 to-blue-11 dark:from-blue-9 dark:via-blue-9 dark:to-blue-10 group"
-							onClick={async () => {
-								if (rawOptions.mode === "instant" && !auth.data) {
-									emit("start-sign-in");
-									return;
-								}
-								if (startDisabled()) return;
-
-								// Snapshot before onRecordingStart: dismissing the picker
-								// (targetMode: null) disposes the <Match> branch that owns
-								// this component, and the display/area target props call its
-								// narrowed accessor — reading props.target afterwards throws
-								// "Stale read from <Match>." and the recording never starts.
-								const target = props.target;
-
-								if (target.variant === "area") {
-									setOptions(
-										"captureTarget",
-										reconcile({
-											variant: "area",
-											screen: target.screen,
-											bounds: {
-												position: {
-													x: target.bounds.position.x,
-													y: target.bounds.position.y,
-												},
-												size: {
-													width: target.bounds.size.width,
-													height: target.bounds.size.height,
-												},
-											},
-										}),
-									);
-								}
-
-								props.onRecordingStart?.();
-
-								if (rawOptions.mode === "screenshot") {
-									try {
-										const allWindows = await WebviewWindow.getAll();
-										for (const win of allWindows) {
-											if (win.label.startsWith("target-select-overlay-")) {
-												await win.setIgnoreCursorEvents(true);
-												await win.hide();
-											}
-										}
-
-										const path = await commands.takeScreenshot(target);
-										const shouldOpenEditor =
-											await commands.automationShouldOpenScreenshotEditor(
-												target,
-											);
-										if (shouldOpenEditor) {
-											await commands.showWindow({ ScreenshotEditor: { path } });
-										}
-										await commands.closeTargetSelectOverlays();
-									} catch (e) {
-										const message = e instanceof Error ? e.message : String(e);
-										toast.error(`Failed to take screenshot: ${message}`);
-										console.error("Failed to take screenshot", e);
-									}
-									return;
-								}
-
-								commands
-									.startRecording({
-										capture_target: target,
-										mode: rawOptions.mode,
-										capture_system_audio: rawOptions.captureSystemAudio,
-									})
-									.then((action) => {
-										// On success the backend closes the overlay windows; the
-										// non-Started actions leave our hidden windows behind.
-										// User-facing feedback for them arrives via the backend's
-										// StartFailed event in the main window.
-										if (action !== "Started")
-											void commands.closeTargetSelectOverlays();
-									})
-									.catch((e: unknown) => {
-										const msg = e instanceof Error ? e.message : String(e);
-										// This webview is hidden by now, so the toast is a
-										// best-effort extra — the visible feedback comes from the
-										// backend's StartFailed event toasted in the main window.
-										if (
-											msg.includes("no longer available") ||
-											msg.includes("DeviceNotFound")
-										) {
-											toast.error(
-												"Selected microphone is not available. Please select a different microphone in settings.",
-											);
-										} else {
-											toast.error(`Failed to start recording: ${msg}`);
-										}
-										// An IPC-level rejection never reaches the backend, so no
-										// StartFailed event fires; the picker flow hid the main
-										// window and dismissal closed the overlays — without this,
-										// the whole app visually vanishes with no recording.
-										void commands.showWindow({
-											Main: { init_target_mode: null },
-										});
-										void commands.closeTargetSelectOverlays();
-									});
+						<Popover
+							open={noMicrophoneWarningOpen()}
+							onOpenChange={(open) => {
+								if (open) setNoMicrophoneWarningOpen(true);
+								else dismissMicrophoneWarning();
 							}}
+							placement="bottom"
+							gutter={8}
 						>
-							<div
-								class="flex flex-1 items-center py-1 pl-4 transition-colors hover:bg-white/10 min-w-0"
-								classList={{
-									"opacity-60 cursor-not-allowed hover:bg-transparent":
-										startDisabled(),
-								}}
+							<Popover.Anchor
+								data-inactive={rawOptions.mode === "instant" && !auth.data}
+								data-disabled={startDisabled()}
+								class="flex flex-1 min-w-0 max-w-[18rem] overflow-hidden flex-row h-11 rounded-full text-white bg-linear-to-r from-blue-10 via-blue-10 to-blue-11 dark:from-blue-9 dark:via-blue-9 dark:to-blue-10 group"
+								onClick={() => void startRecording()}
 							>
-								<Switch>
-									<Match when={rawOptions.mode === "studio"}>
-										<IconCapFilmCut class="size-4 shrink-0" />
-									</Match>
-									<Match when={rawOptions.mode === "instant"}>
-										<IconCapInstant class="size-4 shrink-0" />
-									</Match>
-									<Match when={(rawOptions.mode as string) === "screenshot"}>
-										<IconCapCamera class="size-4 shrink-0" />
-									</Match>
-								</Switch>
-								<div class="flex flex-col mr-2 ml-3 min-w-0">
-									<span class="text-[0.95rem] font-medium text-white text-nowrap">
-										{(() => {
-											if (rawOptions.mode === "instant" && !auth.data)
-												return "Sign In To Use";
-											if (rawOptions.mode === "screenshot")
-												return "Take Screenshot";
-											return "Start Recording";
-										})()}
-									</span>
-									<span class="text-[11px] flex items-center text-nowrap gap-1 transition-opacity duration-200 text-white/90 font-light -mt-0.5">
-										{`${capitalize(rawOptions.mode)} Mode`}
-									</span>
+								<div
+									class="flex flex-1 items-center py-1 pl-4 transition-colors hover:bg-white/10 min-w-0"
+									classList={{
+										"opacity-60 cursor-not-allowed hover:bg-transparent":
+											startDisabled(),
+									}}
+								>
+									<Switch>
+										<Match when={rawOptions.mode === "studio"}>
+											<IconCapFilmCut class="size-4 shrink-0" />
+										</Match>
+										<Match when={rawOptions.mode === "instant"}>
+											<IconCapInstant class="size-4 shrink-0" />
+										</Match>
+										<Match when={(rawOptions.mode as string) === "screenshot"}>
+											<IconCapCamera class="size-4 shrink-0" />
+										</Match>
+									</Switch>
+									<div class="flex flex-col mr-2 ml-3 min-w-0">
+										<span class="text-[0.95rem] font-medium text-white text-nowrap">
+											{(() => {
+												if (rawOptions.mode === "instant" && !auth.data)
+													return "Sign In To Use";
+												if (startLoading()) return "Preparing...";
+												if (rawOptions.mode === "screenshot")
+													return "Take Screenshot";
+												return "Start Recording";
+											})()}
+										</span>
+										<span class="text-[11px] flex items-center text-nowrap gap-1 transition-opacity duration-200 text-white/90 font-light -mt-0.5">
+											{`${capitalize(rawOptions.mode)} Mode`}
+										</span>
+									</div>
 								</div>
-							</div>
-							<div
-								class="pl-2.5 pr-3 py-1.5 flex items-center border-l border-white/20 bg-white/5 transition-colors group-hover:bg-white/10"
-								onMouseDown={(e) => showMenu(menuModes(), e)}
-								onClick={(e) => showMenu(menuModes(), e)}
-							>
-								<IconCapCaretDown class="pointer-events-none" />
-							</div>
-						</div>
-						<div
+								<button
+									type="button"
+									aria-label="Choose recording mode"
+									class="pl-2.5 pr-3 py-1.5 flex items-center border-l border-white/20 bg-white/5 transition-colors group-hover:bg-white/10"
+									onClick={(e) => showMenu(menuModes, e)}
+								>
+									<IconCapCaretDown class="pointer-events-none" />
+								</button>
+							</Popover.Anchor>
+							<Popover.Portal>
+								<Popover.Content class="z-200 w-[min(21rem,calc(100vw-1.5rem))] rounded-xl border border-amber-6 bg-gray-1 p-3.5 text-gray-12 shadow-xl outline-hidden data-expanded:animate-in data-expanded:fade-in data-expanded:zoom-in-95">
+									<div class="flex gap-2.5 items-start">
+										<IconLucideAlertTriangle class="mt-0.5 size-4 shrink-0 text-amber-10" />
+										<div class="flex flex-col gap-1">
+											<p class="text-sm font-semibold">
+												No microphone detected
+											</p>
+											<p class="text-xs leading-relaxed text-gray-10">
+												This recording will not include your voice. Select a
+												microphone, or continue without one.
+											</p>
+										</div>
+									</div>
+									<label class="mt-3 flex cursor-pointer items-center gap-2 text-xs text-gray-11">
+										<input
+											type="checkbox"
+											class="size-3.5 accent-blue-9"
+											checked={dontShowMicrophoneWarning()}
+											onChange={(event) =>
+												setDontShowMicrophoneWarning(
+													event.currentTarget.checked,
+												)
+											}
+										/>
+										Don't show again
+									</label>
+									<div class="flex gap-2 justify-end mt-3">
+										<Popover.CloseButton class="px-3 h-8 text-xs font-medium rounded-lg border border-gray-4 bg-gray-2 text-gray-12 hover:bg-gray-3">
+											Go back
+										</Popover.CloseButton>
+										<button
+											type="button"
+											class="px-3 h-8 text-xs font-medium text-white rounded-lg bg-blue-9 hover:bg-blue-10"
+											onClick={() => void confirmWithoutMicrophone()}
+											disabled={
+												startDisabled() || confirmingWithoutMicrophone()
+											}
+										>
+											Record without microphone
+										</button>
+									</div>
+								</Popover.Content>
+							</Popover.Portal>
+						</Popover>
+						<button
+							type="button"
+							aria-label="Recording countdown"
 							class="flex justify-center items-center rounded-full border transition-opacity bg-gray-6 text-gray-12 size-9 hover:opacity-80"
-							onMouseDown={(e) => showMenu(preRecordingMenu(), e)}
-							onClick={(e) => showMenu(preRecordingMenu(), e)}
+							onClick={(e) => showMenu(preRecordingMenu, e)}
 						>
 							<IconCapGear class="pointer-events-none will-change-transform size-5" />
-						</div>
+						</button>
 					</div>
 				</div>
 				<Show when={(rawOptions.mode as string) !== "screenshot"}>
