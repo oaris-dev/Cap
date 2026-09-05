@@ -112,10 +112,6 @@ const DuplicateCapMenuItem = dynamic(() => import("./DuplicateCapMenuItem"), {
 });
 
 /**
- * Where a signed-out viewer can go next. Three, not the full site nav: this
- * shares the row with the video's title and has to stay out of its way.
- */
-/**
  * Fork: off. Upstream's signed-out nav is Cap's acquisition funnel —
  * Download/Blog/Pricing plus a "Get Cap free" button pointing at cap.so's
  * plans. On a self-hosted instance it advertises a product these viewers
@@ -123,6 +119,10 @@ const DuplicateCapMenuItem = dynamic(() => import("./DuplicateCapMenuItem"), {
  */
 const SHOW_CAP_SIGNUP_NAV = false;
 
+/**
+ * Where a signed-out viewer can go next. Three, not the full site nav: this
+ * shares the row with the video's title and has to stay out of its way.
+ */
 const SIGNED_OUT_LINKS = [
 	{ label: "Download", href: "/download" },
 	{ label: "Blog", href: "/blog" },

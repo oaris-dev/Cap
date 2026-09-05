@@ -835,7 +835,7 @@ export const Transcript: React.FC<TranscriptProps> = ({ data, onSeek }) => {
 										{t("transcript.withTimestamps")}
 									</span>
 									<span className="mt-0.5 block text-[10px] text-gray-9">
-										[0:12] caption lines
+										{t("transcript.withTimestampsHint")}
 									</span>
 								</button>
 							</div>

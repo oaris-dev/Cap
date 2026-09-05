@@ -69,6 +69,7 @@ const en = {
 	"transcript.formattedTextHint": "Clean paragraphs for docs",
 	"transcript.formattedTextFileHint": "Clean paragraphs for docs — .txt",
 	"transcript.withTimestamps": "With timestamps",
+	"transcript.withTimestampsHint": "[0:12] caption lines",
 	"transcript.captionsFile": "Captions file",
 	"transcript.captionsFileHint": "Timestamped subtitles — .vtt",
 	"transcript.transcribingDescription":
@@ -200,6 +201,7 @@ const de: Record<keyof typeof en, string> = {
 	"transcript.formattedTextHint": "Saubere Absätze für Dokumente",
 	"transcript.formattedTextFileHint": "Saubere Absätze für Dokumente — .txt",
 	"transcript.withTimestamps": "Mit Zeitstempeln",
+	"transcript.withTimestampsHint": "[0:12] Untertitelzeilen",
 	"transcript.captionsFile": "Untertiteldatei",
 	"transcript.captionsFileHint": "Untertitel mit Zeitstempeln — .vtt",
 	"transcript.transcribingDescription":

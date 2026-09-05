@@ -254,13 +254,14 @@ export const Sidebar = forwardRef<{ scrollToBottom: () => void }, SidebarProps>(
 									onClick={() => paginate(tab.id as TabType)}
 									onPointerEnter={() => prefetchTab(tab.id)}
 									onFocus={() => prefetchTab(tab.id)}
-									// Fork: sized to their labels rather than an equal
-									// `flex-1` third of the rail. German runs far longer than
-									// English ("Zusammenfassung" vs "Summary") and overflowed a
-									// fixed third, so the labels collided with each other;
-									// min-w-0 + truncate makes that impossible in any language.
+									// Fork: German runs far longer than English
+									// ("Zusammenfassung" vs "Summary") and overflowed an equal
+									// `flex-1` third of the rail, so the labels collided. The
+									// phone card is wide enough to keep thirds; the desktop
+									// rail sizes each tab to its own label instead. min-w-0 +
+									// truncate makes a collision impossible either way.
 									className={classNames(
-										"min-w-0 shrink px-3 py-3 text-sm font-medium relative transition-colors duration-200",
+										"flex-1 min-w-0 lg:flex-initial px-3 py-3 text-sm font-medium relative transition-colors duration-200",
 										"hover:bg-gray-1",
 										activeTab === tab.id ? "bg-gray-3" : "",
 									)}
