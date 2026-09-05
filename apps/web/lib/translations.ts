@@ -372,7 +372,10 @@ export function tParam(
 ): string {
 	let result = getDictionary()[key];
 	for (const [param, value] of Object.entries(params)) {
-		result = result.replace(`{${param}}`, String(value));
+		// Callback, not a string: values are user-controlled (owner and space
+		// names), and a string replacement would read `$&`, `$\``, `$'` and `$1`
+		// in them as substitution patterns rather than text.
+		result = result.replace(`{${param}}`, () => String(value));
 	}
 	return result;
 }
