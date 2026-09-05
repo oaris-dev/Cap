@@ -8,7 +8,6 @@ import {
 	DropdownMenuItem,
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
-	Logo,
 } from "@cap/ui";
 import type { ViewerSettingKey } from "@cap/web-backend";
 import {
@@ -51,6 +50,7 @@ import type { VideoStatusResult } from "@/actions/videos/get-status";
 import { useDashboardContext } from "@/app/(org)/dashboard/DashboardContext";
 import type { Spaces } from "@/app/(org)/dashboard/dashboard-data";
 import { useCurrentUser } from "@/app/Layout/AuthContext";
+import { OarisLogo } from "@/components/OarisLogo";
 import { SignedImageUrl } from "@/components/SignedImageUrl";
 import { Tooltip } from "@/components/Tooltip";
 import { t } from "@/lib/translations";
@@ -115,6 +115,14 @@ const DuplicateCapMenuItem = dynamic(() => import("./DuplicateCapMenuItem"), {
  * Where a signed-out viewer can go next. Three, not the full site nav: this
  * shares the row with the video's title and has to stay out of its way.
  */
+/**
+ * Fork: off. Upstream's signed-out nav is Cap's acquisition funnel —
+ * Download/Blog/Pricing plus a "Get Cap free" button pointing at cap.so's
+ * plans. On a self-hosted instance it advertises a product these viewers
+ * cannot sign up for. The default branding logo still carries the attribution.
+ */
+const SHOW_CAP_SIGNUP_NAV = false;
+
 const SIGNED_OUT_LINKS = [
 	{ label: "Download", href: "/download" },
 	{ label: "Blog", href: "/blog" },
@@ -623,6 +631,7 @@ export const ShareHeader = ({
 	 * the branding has bought the right not to be advertised at.
 	 */
 	const renderSignedOutNav = () => {
+		if (!SHOW_CAP_SIGNUP_NAV) return null;
 		if (user !== null || branding?.type !== "cap") return null;
 
 		return (
@@ -714,7 +723,7 @@ export const ShareHeader = ({
 						href={`/?ref=video_${data.id}`}
 						className="inline-flex h-11 items-center"
 					>
-						<Logo className="h-7 w-auto" />
+						<OarisLogo className="h-7 w-auto text-gray-12" />
 					</a>
 				)}
 			</div>

@@ -213,6 +213,12 @@ interface ShareProps {
 	 * view is active.
 	 */
 	header?: React.ReactNode;
+	/**
+	 * Rendered at the bottom of the scrolling video column. Desktop pins the
+	 * page to the viewport, so a page-level footer under `Share` would be
+	 * clipped — this rides along with the column that actually scrolls.
+	 */
+	footer?: React.ReactNode;
 }
 
 const useVideoStatus = (
@@ -335,6 +341,7 @@ export const Share = ({
 	canRecordMedia = false,
 	viewerSignedIn = false,
 	header,
+	footer,
 }: ShareProps) => {
 	const isScreenshot = data.isScreenshot === true;
 	// Memoized: a fresh Date each render would defeat the memoized `data`
@@ -1127,6 +1134,8 @@ export const Share = ({
 									</AnimatePresence>
 								</div>
 							</div>
+
+							{footer}
 						</div>
 					</div>
 

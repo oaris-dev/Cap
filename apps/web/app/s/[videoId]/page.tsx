@@ -186,16 +186,6 @@ async function getSharedSpacesForVideo(videoId: Video.VideoId) {
 	return sharedSpaces;
 }
 
-const ALLOWED_REFERRERS = [
-	"x.com",
-	"twitter.com",
-	"facebook.com",
-	"fb.com",
-	"slack.com",
-	"notion.so",
-	"linkedin.com",
-];
-
 function TranslatedLink({
 	translationKey,
 	linkText,
@@ -453,9 +443,16 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 			Effect.succeed({ needsPassword: true } as const),
 		),
 		Effect.map((data) => (
+			// overflow-x-clip: the timeline view's theater strip breaks out to
+			// 100vw, which overshoots by the scrollbar width on OSes with classic
+			// scrollbars; clipping here keeps the page from gaining a horizontal
+			// scroll without creating a new scroll container.
+			// Desktop pins the page to the viewport so the comments rail can run
+			// full height and the video column scrolls on its own; phones keep
+			// ordinary document flow.
 			<div
 				key={videoId}
-				className="flex flex-col min-h-screen bg-[oklch(0.992_0.005_78.25)] font-lexend"
+				className="flex overflow-x-clip flex-col min-h-screen bg-[oklch(0.992_0.005_78.25)] font-lexend lg:h-screen lg:min-h-0 lg:overflow-hidden"
 			>
 				<PasswordOverlay isOpen={data.needsPassword} videoId={videoId} />
 				{!data.needsPassword && (
@@ -829,7 +826,6 @@ async function AuthorizedContent({
 		organizationSettings: video.orgSettings,
 		spaces: sharedSpaces.filter((space) => space.id !== space.organizationId),
 	});
-	const env = serverEnv();
 	const transcriptionGenerationAvailable =
 		!video.isScreenshot &&
 		isTranscriptionConfigured() &&
@@ -926,88 +922,102 @@ async function AuthorizedContent({
 	const uiLang = process.env.NEXT_PUBLIC_UI_LANGUAGE || "en";
 
 	return (
-		<>
-			<div className="container flex-1 px-4 pb-8 mx-auto" data-ui-lang={uiLang}>
-				<ShareHeader
-					data={{
-						...videoWithOrganizationInfo,
-						createdAt: video.metadata?.customCreatedAt
-							? new Date(video.metadata.customCreatedAt)
-							: video.createdAt,
-					}}
-					customDomain={customDomain}
-					domainVerified={domainVerified}
-					sharedOrganizations={
-						videoWithOrganizationInfo.sharedOrganizations || []
-					}
-					sharedSpaces={sharedSpaces}
-					userOrganizations={userOrganizations}
-					spacesData={spacesData}
-					branding={getSharePageBranding(videoWithOrganizationInfo)}
-					canManageSharePageBranding={canManageSharePageBranding}
-					canDownload={canDownloadVideo}
-					hasEdits={videoHasEdits}
-				/>
+		<div className="flex flex-col flex-1 min-h-0" data-ui-lang={uiLang}>
+			<Share
+				header={
+					<ShareHeader
+						data={{
+							...videoWithOrganizationInfo,
+							createdAt: video.metadata?.customCreatedAt
+								? new Date(video.metadata.customCreatedAt)
+								: video.createdAt,
+						}}
+						customDomain={customDomain}
+						domainVerified={domainVerified}
+						sharedOrganizations={
+							videoWithOrganizationInfo.sharedOrganizations || []
+						}
+						sharedSpaces={sharedSpaces}
+						userOrganizations={userOrganizations}
+						spacesData={spacesData}
+						branding={getSharePageBranding(videoWithOrganizationInfo)}
+						canManageSharePageBranding={canManageSharePageBranding}
+						canDownload={canDownloadVideo}
+						hasEdits={videoHasEdits}
+						// Caught separately from the copy the sidebar consumes: the
+						// header renders for everyone, and a failed count is worth
+						// less than the header it would otherwise take down.
+						views={viewsPromise.catch(() => null)}
+					/>
+				}
+				// The attribution and the legal links German hosting requires. A slot
+				// rather than markup after `Share`: on desktop the page is pinned to
+				// the viewport, so anything outside the scrolling video column would
+				// be clipped away.
+				footer={<ShareFooter />}
+				data={videoWithOrganizationInfo}
+				screenshotImageUrl={screenshotImageUrl}
+				videoSettings={videoWithOrganizationInfo.settings}
+				comments={commentsPromise}
+				views={viewsPromise}
+				customDomain={customDomain}
+				domainVerified={domainVerified}
+				userOrganizations={userOrganizations}
+				viewerId={user?.id ?? null}
+				viewerSignedIn={user !== null}
+				initialView={initialShareView}
+				canRecordMedia={canRecordMedia}
+				isEditProcessing={isEditProcessing}
+				recordingStopped={recordingStopped}
+				defaultPlaybackSpeed={defaultPlaybackSpeed}
+				initialAiData={initialAiData}
+				aiGenerationAvailable={aiGenerationEnabled && aiProviderAvailable}
+				transcriptionGenerationAvailable={transcriptionGenerationAvailable}
+			/>
+		</div>
+	);
+}
 
-				<Share
-					data={videoWithOrganizationInfo}
-					screenshotImageUrl={screenshotImageUrl}
-					videoSettings={videoWithOrganizationInfo.settings}
-					comments={commentsPromise}
-					views={viewsPromise}
-					customDomain={customDomain}
-					domainVerified={domainVerified}
-					userOrganizations={userOrganizations}
-					viewerId={user?.id ?? null}
-					isEditProcessing={isEditProcessing}
-					recordingStopped={recordingStopped}
-					defaultPlaybackSpeed={defaultPlaybackSpeed}
-					initialAiData={initialAiData}
-					aiGenerationAvailable={aiGenerationEnabled && aiProviderAvailable}
-					transcriptionGenerationAvailable={transcriptionGenerationAvailable}
-				/>
+function ShareFooter() {
+	return (
+		<div className="flex flex-col gap-3 justify-center items-center pt-2 pb-6 mx-auto w-fit">
+			<a
+				target="_blank"
+				href="https://cap.so"
+				rel="noopener"
+				className="flex justify-center items-center px-4 py-2 mx-auto space-x-2 bg-white rounded-full border border-gray-5 w-fit"
+			>
+				<span className="text-sm">{t("share.recordedWith")}</span>
+				<Logo className="w-14 h-auto" />
+			</a>
+			<div className="flex gap-3 items-center text-xs text-gray-9">
+				<a
+					href="https://oaris.de/impressum"
+					target="_blank"
+					rel="noopener"
+					className="transition-colors hover:text-gray-12"
+				>
+					Impressum
+				</a>
+				<span>·</span>
+				<a
+					href="https://oaris.de/datenschutz"
+					target="_blank"
+					rel="noopener"
+					className="transition-colors hover:text-gray-12"
+				>
+					Datenschutz
+				</a>
+				<span>·</span>
+				<a
+					href="https://oaris.de/kontakt"
+					target="_blank"
+					rel="noopener"
+					className="transition-colors hover:text-gray-12"
+				>
+					Kontakt
+				</a>
 			</div>
-			<div className="py-4 mt-auto">
-				<div className="flex flex-col justify-center items-center gap-3 mx-auto mb-2 w-fit">
-					<a
-						target="_blank"
-						href="https://cap.so"
-						rel="noopener"
-						className="flex justify-center items-center px-4 py-2 mx-auto space-x-2 bg-white rounded-full border border-gray-5 w-fit"
-					>
-						<span className="text-sm">{t("share.recordedWith")}</span>
-						<Logo className="w-14 h-auto" />
-					</a>
-					<div className="flex items-center gap-3 text-xs text-gray-9">
-						<a
-							href="https://oaris.de/impressum"
-							target="_blank"
-							rel="noopener"
-							className="hover:text-gray-12 transition-colors"
-						>
-							Impressum
-						</a>
-						<span>·</span>
-						<a
-							href="https://oaris.de/datenschutz"
-							target="_blank"
-							rel="noopener"
-							className="hover:text-gray-12 transition-colors"
-						>
-							Datenschutz
-						</a>
-						<span>·</span>
-						<a
-							href="https://oaris.de/kontakt"
-							target="_blank"
-							rel="noopener"
-							className="hover:text-gray-12 transition-colors"
-						>
-							Kontakt
-						</a>
-					</div>
-				</div>
-			</div>
-		</>
+		</div>
 	);
 }
