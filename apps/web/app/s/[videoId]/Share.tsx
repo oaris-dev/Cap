@@ -26,6 +26,7 @@ import {
 } from "@/actions/videos/get-status";
 import type { OrganizationSettings } from "@/app/(org)/dashboard/dashboard-data";
 import { SignedImageUrl } from "@/components/SignedImageUrl";
+import { t } from "@/lib/translations";
 import { CaptionProvider } from "./_components/CaptionContext";
 import { PlaybackProvider } from "./_components/playback/PlaybackContext";
 import { ShareVideo } from "./_components/ShareVideo";
@@ -1198,8 +1199,8 @@ export const Share = ({
 						<button
 							type="button"
 							onClick={toggleRail}
-							aria-label="Show comments"
-							title="Show comments"
+							aria-label={t("sidebar.showComments")}
+							title={t("sidebar.showComments")}
 							className="hidden fixed right-0 top-1/2 z-30 items-center justify-center -translate-y-1/2 rounded-l-lg border border-r-0 border-gray-5 bg-white h-16 w-6 text-gray-10 shadow-sm transition-colors hover:text-gray-12 lg:flex"
 						>
 							<ChevronGlyph direction="left" />

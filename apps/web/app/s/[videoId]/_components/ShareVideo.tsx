@@ -21,6 +21,7 @@ import { finalizeDesktopSegmentsRecording } from "@/actions/video/finalize-deskt
 import { OarisLogo } from "@/components/OarisLogo";
 import { Tooltip } from "@/components/Tooltip";
 import { isRetryableDesktopSegmentsFinalizationError } from "@/lib/desktop-segments-retryable-errors";
+import { t } from "@/lib/translations";
 import type { VideoData } from "../types";
 import { type CaptionLanguage, useCaptionContext } from "./CaptionContext";
 import { scheduleReadyRefresh } from "./deferred-ready-refresh";
@@ -678,7 +679,7 @@ export const ShareVideo = forwardRef<
 						<button
 							type="button"
 							className="block"
-							aria-label="Remove watermark"
+							aria-label={t("share.removeWatermark")}
 							onClick={(e) => {
 								e.stopPropagation();
 								openUpgradeModal();
