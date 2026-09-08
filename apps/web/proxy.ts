@@ -15,6 +15,7 @@ import {
 	PER_VIDEO_PASSWORD_COOKIE_PREFIX,
 	perVideoPasswordCookieName,
 } from "@/lib/password-cookie-shared";
+import { getShareIframeRedirectUrl } from "@/lib/share-iframe-navigation";
 
 const addHttps = (s?: string) => {
 	if (!s) return s;
@@ -112,13 +113,16 @@ export async function proxy(request: NextRequest) {
 		return response;
 	}
 
-	if (
-		path.startsWith("/s/") &&
-		request.headers.get("sec-fetch-dest") === "iframe"
-	) {
-		const embedPath = path.replace(/^\/s\//, "/embed/");
-		const embedUrl = new URL(embedPath + url.search, url.origin);
-		return NextResponse.redirect(embedUrl, 302);
+	const shareIframeRedirectUrl = getShareIframeRedirectUrl({
+		method: request.method,
+		requestUrl: request.url,
+		fetchDestination: request.headers.get("sec-fetch-dest"),
+	});
+	if (shareIframeRedirectUrl) {
+		const redirectResponse = NextResponse.redirect(shareIframeRedirectUrl);
+		redirectResponse.headers.set("Cache-Control", "private, no-store");
+		redirectResponse.headers.set("Vary", "Sec-Fetch-Dest");
+		return redirectResponse;
 	}
 
 	if (path.startsWith("/embed/")) {

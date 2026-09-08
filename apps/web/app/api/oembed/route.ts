@@ -1,117 +1,85 @@
-import { db } from "@cap/database";
-import { videos } from "@cap/database/schema";
 import { buildEnv } from "@cap/env";
 import { Video } from "@cap/web-domain";
-import { eq } from "drizzle-orm";
-import { type NextRequest, NextResponse } from "next/server";
+import {
+	HttpApi,
+	HttpApiBuilder,
+	HttpApiEndpoint,
+	HttpApiGroup,
+	HttpServerResponse,
+} from "@effect/platform";
+import { Effect, Layer, Schema } from "effect";
+import { buildOEmbedVideo, parseCapShareUrl } from "@/lib/oembed";
+import { getPublicShareVideo } from "@/lib/public-share-video";
+import { apiToHandler } from "@/lib/server";
 
-const DEFAULT_WIDTH = 1280;
-const DEFAULT_HEIGHT = 720;
+const GetOEmbedParams = Schema.Struct({
+	url: Schema.String,
+	format: Schema.optional(Schema.String),
+	maxwidth: Schema.optional(Schema.String),
+	maxheight: Schema.optional(Schema.String),
+});
 
-function extractVideoId(urlParam: string): string | null {
-	try {
-		const parsed = new URL(urlParam);
-		const match = parsed.pathname.match(/^\/s\/([^/]+)$/);
-		return match?.[1] ?? null;
-	} catch {
-		return null;
-	}
-}
+class Api extends HttpApi.make("CapOEmbedApi").add(
+	HttpApiGroup.make("root").add(
+		HttpApiEndpoint.get("getOEmbed")`/api/oembed`.setUrlParams(GetOEmbedParams),
+	),
+) {}
 
-export async function GET(req: NextRequest) {
-	const url = req.nextUrl.searchParams.get("url");
-	const format = req.nextUrl.searchParams.get("format");
-	const maxwidthParam = req.nextUrl.searchParams.get("maxwidth");
-	const maxheightParam = req.nextUrl.searchParams.get("maxheight");
-
-	if (format && format !== "json") {
-		return NextResponse.json(
-			{ error: "Only JSON format is supported" },
-			{ status: 501 },
-		);
-	}
-
-	if (!url) {
-		return NextResponse.json(
-			{ error: "Missing required 'url' parameter" },
-			{ status: 400 },
-		);
-	}
-
-	const rawVideoId = extractVideoId(url);
-	if (!rawVideoId) {
-		return NextResponse.json(
-			{ error: "Invalid URL: must match /s/{videoId}" },
-			{ status: 404 },
-		);
-	}
-
-	const videoId = Video.VideoId.make(rawVideoId);
-
-	const result = await db()
-		.select({
-			id: videos.id,
-			name: videos.name,
-			ownerId: videos.ownerId,
-			public: videos.public,
-			width: videos.width,
-			height: videos.height,
-		})
-		.from(videos)
-		.where(eq(videos.id, videoId))
-		.limit(1);
-
-	const video = result[0];
-	if (!video || !video.public) {
-		return NextResponse.json({ error: "Video not found" }, { status: 404 });
-	}
-
-	const videoWidth = video.width || DEFAULT_WIDTH;
-	const videoHeight = video.height || DEFAULT_HEIGHT;
-
-	const maxwidth = maxwidthParam ? Number.parseInt(maxwidthParam, 10) : null;
-	const maxheight = maxheightParam ? Number.parseInt(maxheightParam, 10) : null;
-
-	let width = videoWidth;
-	let height = videoHeight;
-
-	if (maxwidth && width > maxwidth) {
-		const scale = maxwidth / width;
-		width = maxwidth;
-		height = Math.round(height * scale);
-	}
-
-	if (maxheight && height > maxheight) {
-		const scale = maxheight / height;
-		height = maxheight;
-		width = Math.round(width * scale);
-	}
-
-	const baseUrl = buildEnv.NEXT_PUBLIC_WEB_URL;
-	const embedUrl = new URL(`/embed/${video.id}`, baseUrl).toString();
-	const thumbnailUrl = new URL(
-		`/api/video/og?videoId=${video.id}`,
-		baseUrl,
-	).toString();
-
-	const oembedResponse = {
-		version: "1.0",
-		type: "video",
-		provider_name: "Cap",
-		provider_url: baseUrl,
-		title: video.name,
-		thumbnail_url: thumbnailUrl,
-		thumbnail_width: 1200,
-		thumbnail_height: 630,
-		width,
-		height,
-		html: `<iframe src="${embedUrl}" width="${width}" height="${height}" frameborder="0" allow="autoplay; fullscreen" allowfullscreen></iframe>`,
-	};
-
-	return NextResponse.json(oembedResponse, {
+const jsonResponse = (body: unknown, status = 200) =>
+	HttpServerResponse.text(JSON.stringify(body), {
+		status,
+		contentType: "application/json; charset=utf-8",
 		headers: {
-			"Content-Type": "application/json+oembed",
-			"Cache-Control": "public, max-age=3600",
+			"Access-Control-Allow-Origin": "*",
+			"Cache-Control":
+				status === 200
+					? "public, max-age=300, stale-while-revalidate=3600"
+					: "private, no-store",
+			"X-Content-Type-Options": "nosniff",
 		},
 	});
-}
+
+const ApiLive = HttpApiBuilder.api(Api).pipe(
+	Layer.provide(
+		HttpApiBuilder.group(Api, "root", (handlers) =>
+			handlers.handle("getOEmbed", ({ urlParams }) =>
+				Effect.gen(function* () {
+					if (urlParams.format && urlParams.format !== "json") {
+						return jsonResponse(
+							{ error: "Only the json oEmbed format is supported" },
+							501,
+						);
+					}
+					const videoId = parseCapShareUrl(urlParams.url);
+					if (!videoId) {
+						return jsonResponse({ error: "Invalid Cap share URL" }, 400);
+					}
+					const video = yield* Effect.tryPromise(() =>
+						getPublicShareVideo(Video.VideoId.make(videoId)),
+					);
+					if (!video) {
+						return jsonResponse({ error: "Video not found" }, 404);
+					}
+					return jsonResponse(
+						buildOEmbedVideo({
+							video,
+							webUrl: buildEnv.NEXT_PUBLIC_WEB_URL,
+							maxWidth: urlParams.maxwidth,
+							maxHeight: urlParams.maxheight,
+						}),
+					);
+				}).pipe(
+					Effect.catchAll(() =>
+						Effect.succeed(
+							jsonResponse({ error: "Unable to load video" }, 500),
+						),
+					),
+				),
+			),
+		),
+	),
+);
+
+const handler = apiToHandler(ApiLive);
+
+export const GET = handler;

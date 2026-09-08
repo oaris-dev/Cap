@@ -28,6 +28,15 @@ import {
 	type TranscriptEntry,
 } from "@/app/s/[videoId]/_components/utils/transcript-utils";
 import { OarisLogo } from "@/components/OarisLogo";
+import { usePlayerJsReceiver } from "./use-player-js-receiver";
+
+const formatTime = (time: number) => {
+	const minutes = Math.floor(time / 60);
+	const seconds = Math.floor(time % 60);
+	return `${minutes.toString().padStart(2, "0")}:${seconds
+		.toString()
+		.padStart(2, "0")}`;
+};
 
 declare global {
 	interface Window {
@@ -50,6 +59,9 @@ export const EmbedVideo = forwardRef<
 		chapters?: { title: string; start: number }[];
 		ownerName?: string | null;
 		autoplay?: boolean;
+		/** Seconds to open at, from the embed URL's `?t=`. */
+		startTime?: number | null;
+		minimal?: boolean;
 		viewerSettings?: ViewerSettings | null;
 		showPlaybackStatusBadge?: boolean;
 		embedToken?: string;
@@ -62,7 +74,9 @@ export const EmbedVideo = forwardRef<
 			comments: _comments,
 			chapters = [],
 			ownerName,
-			autoplay: _autoplay = false,
+			autoplay = false,
+			startTime = null,
+			minimal = false,
 			viewerSettings,
 			showPlaybackStatusBadge = false,
 			embedToken,
@@ -70,7 +84,10 @@ export const EmbedVideo = forwardRef<
 		ref,
 	) => {
 		const videoRef = useRef<HTMLVideoElement>(null);
+		const seekedToStart = useRef(false);
+		const playerContainerRef = useRef<HTMLDivElement>(null);
 		useImperativeHandle(ref, () => videoRef.current as HTMLVideoElement);
+		usePlayerJsReceiver({ playerContainerRef, videoRef });
 
 		const [transcriptData, setTranscriptData] = useState<TranscriptEntry[]>([]);
 		const [longestDuration, setLongestDuration] = useState<number>(
@@ -199,21 +216,44 @@ export const EmbedVideo = forwardRef<
 		useEffect(() => {
 			if (!videoRef.current) return;
 			const player = videoRef.current;
+			const handleLoadedMetadata = () => {
+				setLongestDuration(player.duration);
 
-			const listener = (arg: boolean) => {
-				setIsPlaying(arg);
+				// Once only. HLS level switches and source swaps fire this again, and
+				// yanking a viewer who has since scrubbed back to the start offset
+				// would be worse than ignoring the deep link.
+				if (startTime === null || seekedToStart.current) return;
+				seekedToStart.current = true;
+				const limit = Number.isFinite(player.duration)
+					? Math.max(player.duration - 0.001, 0)
+					: startTime;
+				try {
+					player.currentTime = Math.min(startTime, limit);
+				} catch (error) {
+					console.warn("Failed to seek embed to start time", error);
+				}
 			};
-			player.addEventListener("play", () => listener(true));
-			player.addEventListener("pause", () => listener(false));
+
+			if (player.readyState >= 1) {
+				handleLoadedMetadata();
+			} else {
+				player.addEventListener("loadedmetadata", handleLoadedMetadata);
+			}
+
 			return () => {
-				player.removeEventListener("play", () => listener(true));
-				player.removeEventListener("pause", () => listener(false));
+				player.removeEventListener("loadedmetadata", handleLoadedMetadata);
 			};
-		}, []);
+		}, [startTime]);
 
 		return (
 			<div className="flex flex-col w-screen h-screen bg-black">
-				<div className="relative flex-1 min-h-0">
+				<div
+					ref={playerContainerRef}
+					className="relative flex-1 min-h-0"
+					onPlayCapture={() => setIsPlaying(true)}
+					onPauseCapture={() => setIsPlaying(false)}
+					onEndedCapture={() => setIsPlaying(false)}
+				>
 					{isActivelyRecording ? (
 						<RecordingInProgressOverlay
 							onConfirmStopped={() => setUserConfirmedStopped(true)}
@@ -233,6 +273,7 @@ export const EmbedVideo = forwardRef<
 							chaptersSrc={chaptersDisabled ? "" : chaptersUrl || ""}
 							captionsSrc={captionsDisabled ? "" : subtitleUrl || ""}
 							videoRef={videoRef}
+							autoplay={autoplay}
 							enableCrossOrigin={enableCrossOrigin}
 							hasActiveUpload={data.hasActiveUpload}
 						/>
@@ -246,30 +287,82 @@ export const EmbedVideo = forwardRef<
 							chaptersSrc={chaptersDisabled ? "" : chaptersUrl || ""}
 							captionsSrc={captionsDisabled ? "" : subtitleUrl || ""}
 							videoRef={videoRef}
+							autoplay={autoplay}
 							hasActiveUpload={data.hasActiveUpload}
 							isLiveSegments={isSegmentsSource}
 						/>
 					)}
 
-					<AnimatePresence>
-						{!isPlaying && (
-							<motion.a
-								href={`/s/${data.id}`}
-								target="_blank"
-								rel="noopener noreferrer"
-								initial={{ opacity: 0, y: 10 }}
-								animate={{ opacity: 1, y: 0 }}
-								exit={{ opacity: 0, y: 10 }}
-								transition={{ duration: 0.3, delay: 0.2 }}
-								onClick={(e) => e.stopPropagation()}
-								className="absolute top-3 left-3 z-10 bg-black/50 backdrop-blur-md rounded-lg px-3 py-1.5 border border-white/10 shadow-2xl"
-							>
-								<h1 className="text-xs sm:text-sm font-semibold leading-tight text-white truncate max-w-[200px] sm:max-w-[400px] hover:underline">
-									{data.name}
-								</h1>
-							</motion.a>
-						)}
-					</AnimatePresence>
+					{!minimal && (
+						<AnimatePresence>
+							{!isPlaying && (
+								<div className="absolute top-3 left-3 z-10 space-y-2">
+									<motion.div
+										initial={{ opacity: 0, y: 10 }}
+										animate={{ opacity: 1, y: 0 }}
+										exit={{ opacity: 0, y: 10 }}
+										transition={{ duration: 0.3, delay: 0.2 }}
+										className="z-10 bg-black/50 backdrop-blur-md rounded-lg sm:rounded-xl px-2 py-1.5 sm:px-4 sm:py-3 border border-white/10 shadow-2xl"
+									>
+										<div className="flex gap-2 items-center sm:gap-3">
+											{ownerName && (
+												<Avatar
+													name={ownerName}
+													className="hidden flex-shrink-0 xs:flex xs:size-10"
+													letterClass="xs:text-base font-medium"
+												/>
+											)}
+											<div className="flex-1 min-w-0">
+												<a
+													href={`/s/${data.id}`}
+													target="_blank"
+													rel="noopener noreferrer"
+													className="block"
+													onClick={(e) => e.stopPropagation()}
+												>
+													<h1 className="text-xs max-w-[175px] xs:max-w-[300px] sm:max-w-[400px] font-semibold md:max-w-[500px] leading-tight text-white truncate transition-all duration-200 cursor-pointer sm:text-xl md:text-2xl hover:underline">
+														{data.name}
+													</h1>
+												</a>
+												<div className="flex items-center gap-1 sm:gap-2 mt-0.5 sm:mt-1">
+													{ownerName && (
+														<p className="text-xs font-medium text-gray-300 truncate sm:text-sm">
+															{ownerName}
+														</p>
+													)}
+													{ownerName && longestDuration > 0 && (
+														<>
+															<span className="text-xs text-gray-400">•</span>
+															<p className="text-xs text-gray-300 sm:text-sm">
+																{formatTime(longestDuration)}
+															</p>
+														</>
+													)}
+												</div>
+											</div>
+										</div>
+									</motion.div>
+									<motion.button
+										initial={{ opacity: 0, y: 10 }}
+										animate={{ opacity: 1, y: 0 }}
+										exit={{ opacity: 0, y: 10 }}
+										transition={{ duration: 0.3, delay: 0.1 }}
+										onClick={(e) => {
+											e.stopPropagation();
+											window.open("https://cap.so", "_blank");
+										}}
+										className="hidden z-10 gap-2 items-center px-3 py-2 text-sm rounded-full border backdrop-blur-sm transition-colors duration-200 sm:flex border-white/10 w-fit text-white/80 hover:text-white bg-black/50"
+										aria-label="Powered by Cap"
+									>
+										<span className="text-xs md:text-sm text-white/80">
+											Powered by
+										</span>
+										<Logo className="w-auto h-4" white={true} />
+									</motion.button>
+								</div>
+							)}
+						</AnimatePresence>
+					)}
 				</div>
 
 				<div className="flex items-center justify-between px-3 py-2 bg-white flex-none">
