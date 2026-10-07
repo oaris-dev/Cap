@@ -9,7 +9,7 @@
 
 import { t, tParam } from "@/lib/translations";
 
-export type ShareAudienceKind = "public" | "spaces" | "private";
+export type ShareAudienceKind = "public" | "spaces" | "people" | "private";
 
 export interface ShareAudience {
 	kind: ShareAudienceKind;
@@ -19,6 +19,7 @@ export interface ShareAudience {
 
 export interface ShareAudienceInput {
 	isPublic: boolean;
+	allowedEmailDomain?: string | null;
 	/** Includes an inherited password from a space or organization. */
 	passwordProtected: boolean;
 	/**
@@ -27,6 +28,7 @@ export interface ShareAudienceInput {
 	 * "Shared with 2 spaces" rather than printing an empty one.
 	 */
 	audienceNames: (string | null | undefined)[];
+	viewerCount?: number;
 }
 
 const listNames = (names: string[], total: number): string => {
@@ -50,12 +52,28 @@ const listNames = (names: string[], total: number): string => {
 	);
 };
 
+/** Appended to a tooltip when a password gates the link as well. */
+const passwordSuffix = (passwordProtected: boolean): string =>
+	passwordProtected ? t("audience.passwordAlsoRequired") : "";
+
 export const describeShareAudience = ({
 	isPublic,
+	allowedEmailDomain,
 	passwordProtected,
 	audienceNames,
+	viewerCount = 0,
 }: ShareAudienceInput): ShareAudience => {
 	if (isPublic) {
+		if (allowedEmailDomain?.trim()) {
+			return {
+				kind: "public",
+				label: t("audience.restrictedLink"),
+				tooltip:
+					tParam("audience.restrictedLinkTooltip", {
+						domain: allowedEmailDomain.trim(),
+					}) + passwordSuffix(passwordProtected),
+			};
+		}
 		return {
 			kind: "public",
 			label: passwordProtected
@@ -75,17 +93,46 @@ export const describeShareAudience = ({
 	if (total > 0) {
 		const listed = named.slice(0, 2);
 		const remainder = total - listed.length;
+		const spaceDescription = listed.length
+			? remainder > 0
+				? tParam("audience.membersOfMore", {
+						names: listed.join(", "),
+						count: remainder,
+					})
+				: tParam("audience.membersOf", { names: listed.join(", ") })
+			: t("audience.membersOfUnnamed");
 		return {
 			kind: "spaces",
-			label: listNames(listed, total),
-			tooltip: listed.length
-				? remainder > 0
-					? tParam("audience.spacesTooltipMore", {
-							names: listed.join(", "),
-							count: remainder,
-						})
-					: tParam("audience.spacesTooltip", { names: listed.join(", ") })
-				: t("audience.spacesTooltipUnnamed"),
+			label:
+				viewerCount > 0
+					? tParam(
+							viewerCount === 1
+								? "audience.sharedWithSpacesAndPerson"
+								: "audience.sharedWithSpacesAndPeople",
+							{ count: viewerCount },
+						)
+					: listNames(listed, total),
+			tooltip:
+				viewerCount > 0
+					? tParam(
+							viewerCount === 1
+								? "audience.spacesAndPersonTooltip"
+								: "audience.spacesAndPeopleTooltip",
+							{ spaces: spaceDescription, count: viewerCount },
+						) + passwordSuffix(passwordProtected)
+					: tParam("audience.spacesTooltip", { spaces: spaceDescription }),
+		};
+	}
+	if (viewerCount > 0) {
+		return {
+			kind: "people",
+			label: tParam(
+				viewerCount === 1
+					? "audience.sharedWithPerson"
+					: "audience.sharedWithPeople",
+				{ count: viewerCount },
+			),
+			tooltip: t("audience.peopleTooltip") + passwordSuffix(passwordProtected),
 		};
 	}
 
