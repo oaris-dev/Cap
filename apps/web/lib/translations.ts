@@ -1,5 +1,3 @@
-import { buildEnv } from "@cap/env";
-
 const en = {
 	"password.title": "Protected Video",
 	"password.description":
@@ -395,7 +393,12 @@ function getLanguage(): string {
 		}
 	}
 
-	const lang = buildEnv.NEXT_PUBLIC_UI_LANGUAGE || "en";
+	// Read the variable rather than the validated buildEnv object: this module
+	// is imported by nearly every share component, so importing buildEnv makes
+	// each of them validate the whole build env at import time, which fails in
+	// unit tests that have no NEXT_PUBLIC_WEB_URL. app/layout.tsx reads it the
+	// same way.
+	const lang = process.env.NEXT_PUBLIC_UI_LANGUAGE || "en";
 	if (typeof window === "undefined") return lang;
 	_cachedLang = lang;
 	return lang;
