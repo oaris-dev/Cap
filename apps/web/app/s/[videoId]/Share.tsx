@@ -15,6 +15,7 @@ import {
 	use,
 	useCallback,
 	useEffect,
+	useId,
 	useMemo,
 	useOptimistic,
 	useRef,
@@ -26,8 +27,10 @@ import {
 } from "@/actions/videos/get-status";
 import type { OrganizationSettings } from "@/app/(org)/dashboard/dashboard-data";
 import { SignedImageUrl } from "@/components/SignedImageUrl";
+import type { ShareDashboardDestination } from "@/lib/share-dashboard-destination";
 import { t } from "@/lib/translations";
 import { CaptionProvider } from "./_components/CaptionContext";
+import { DashboardBackLink } from "./_components/DashboardBackLink";
 import { PlaybackProvider } from "./_components/playback/PlaybackContext";
 import { ShareVideo } from "./_components/ShareVideo";
 import { type ShareView, ShareViewToggle } from "./_components/ShareViewToggle";
@@ -45,9 +48,6 @@ const TimelineView = dynamic(importTimelineView, { ssr: false });
 // exists, so videos without a summary never download it. SSR still renders
 // the summary into the initial HTML when the data is already there.
 const SummaryChapters = dynamic(() => import("./_components/SummaryChapters"));
-
-/** Whether the viewer last left the comments rail collapsed. */
-const RAIL_COLLAPSED_KEY = "cap_share_rail_collapsed";
 
 /**
  * The interactive walkthrough behind the header's "How does this work?".
@@ -185,6 +185,7 @@ type TranscriptionStatus =
 
 interface ShareProps {
 	data: VideoData;
+	initialPlaybackUrl?: Promise<string | null>;
 	comments: MaybePromise<CommentWithAuthor[]>;
 	views: MaybePromise<number>;
 	screenshotImageUrl?: string | null;
@@ -206,6 +207,8 @@ interface ShareProps {
 	transcriptionGenerationAvailable: boolean;
 	/** Server-resolved `?view=` so the first paint already has the right layout. */
 	initialView?: ShareView;
+	/** Server-resolved `?captions=off` so the player never flashes captions on before hiding them. */
+	captionsInitiallyOff?: boolean;
 	canRecordMedia?: boolean;
 	viewerSignedIn?: boolean;
 	/**
@@ -214,6 +217,7 @@ interface ShareProps {
 	 * view is active.
 	 */
 	header?: React.ReactNode;
+	dashboardDestination?: ShareDashboardDestination | null;
 	/**
 	 * Rendered at the bottom of the scrolling video column. Desktop pins the
 	 * page to the viewport, so a page-level footer under `Share` would be
@@ -327,6 +331,7 @@ const useVideoStatus = (
 
 export const Share = ({
 	data,
+	initialPlaybackUrl,
 	comments,
 	views,
 	screenshotImageUrl,
@@ -339,9 +344,11 @@ export const Share = ({
 	aiGenerationAvailable,
 	transcriptionGenerationAvailable,
 	initialView = "classic",
+	captionsInitiallyOff = false,
 	canRecordMedia = false,
 	viewerSignedIn = false,
 	header,
+	dashboardDestination = null,
 	footer,
 }: ShareProps) => {
 	const isScreenshot = data.isScreenshot === true;
@@ -472,6 +479,7 @@ export const Share = ({
 	const initialSeekDone = useRef(false);
 
 	useEffect(() => {
+		if (data.source.type === "desktopSegments") return;
 		if (!searchParams.has("recordingStopped")) return;
 
 		const url = new URL(window.location.href);
@@ -481,7 +489,7 @@ export const Share = ({
 			"",
 			`${url.pathname}${url.search}${url.hash}`,
 		);
-	}, [searchParams]);
+	}, [data.source.type, searchParams]);
 
 	const handleSeek = useCallback((time: number) => {
 		const v =
@@ -725,31 +733,12 @@ export const Share = ({
 	]);
 
 	const showRail = view === "classic" && !allSettingsDisabled;
+	const sidebarId = useId();
 	const [railCollapsed, setRailCollapsed] = useState(false);
 
-	// Read after mount, not during render: the server has no idea what the
-	// viewer collapsed last time, and guessing would hydrate the wrong width.
-	useEffect(() => {
-		try {
-			setRailCollapsed(
-				window.localStorage.getItem(RAIL_COLLAPSED_KEY) === "true",
-			);
-		} catch {
-			/* private mode; the default (open) is fine */
-		}
-	}, []);
-
 	const toggleRail = useCallback(() => {
-		// Persist outside the updater: React may invoke updater functions more
-		// than once, and localStorage writes don't belong in render-adjacent code.
-		const next = !railCollapsed;
-		setRailCollapsed(next);
-		try {
-			window.localStorage.setItem(RAIL_COLLAPSED_KEY, String(next));
-		} catch {
-			/* not worth failing the toggle over */
-		}
-	}, [railCollapsed]);
+		setRailCollapsed((collapsed) => !collapsed);
+	}, []);
 
 	return (
 		<CaptionProvider
@@ -812,6 +801,12 @@ export const Share = ({
 									// the player instead.
 									<div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between gap-3 rounded-t-xl border border-b-0 border-gray-5 bg-white px-5">
 										<div className="flex min-w-0 items-center gap-3">
+											{dashboardDestination && (
+												<DashboardBackLink
+													destination={dashboardDestination}
+													compact
+												/>
+											)}
 											<SignedImageUrl
 												image={data.owner.image}
 												name={data.owner.name ?? "Someone"}
@@ -967,10 +962,12 @@ export const Share = ({
 													/>
 												) : (
 													<ShareVideo
+														initialPlaybackUrl={initialPlaybackUrl}
 														data={shareVideoData}
 														comments={comments}
 														areChaptersDisabled={areChaptersDisabled}
 														areCaptionsDisabled={areCaptionsDisabled}
+														captionsInitiallyOff={captionsInitiallyOff}
 														// The deck under the video owns seeking, the clock and
 														// comments in timeline view; duplicating them inside the
 														// video reads as two players. Fullscreen hides the deck,
@@ -1002,6 +999,7 @@ export const Share = ({
 														recordingStopped={recordingStopped}
 														defaultPlaybackSpeed={defaultPlaybackSpeed}
 														viewerIsOwner={viewerId === data.owner.id}
+														callToAction={data.callToAction}
 														ref={playerRef}
 													/>
 												)}
@@ -1024,7 +1022,12 @@ export const Share = ({
 												 * absolute placement (desktop) keeps the toolbar pill
 												 * centred rather than pushed aside.
 												 */}
-												<div className="relative">
+												<div
+													className={clsx(
+														"relative",
+														showRail && railCollapsed && "lg:min-h-10 lg:px-40",
+													)}
+												>
 													{timelineAvailable && (
 														<div className="mb-3 flex justify-start lg:absolute lg:left-0 lg:top-1/2 lg:mb-0 lg:-translate-y-1/2">
 															<ShareViewToggle
@@ -1043,6 +1046,18 @@ export const Share = ({
 														canRecordMedia={canRecordMedia && !isScreenshot}
 														data={data}
 													/>
+													{showRail && railCollapsed && (
+														<button
+															type="button"
+															onClick={toggleRail}
+															aria-controls={sidebarId}
+															aria-expanded={false}
+															className="hidden absolute right-0 top-1/2 items-center justify-center gap-2 -translate-y-1/2 rounded-lg border border-gray-5 bg-white h-10 px-3 text-sm font-medium text-gray-10 shadow-sm transition-colors hover:text-gray-12 lg:flex"
+														>
+															<ChevronGlyph direction="left" />
+															{t("sidebar.showSidebar")}
+														</button>
+													)}
 												</div>
 											</motion.div>
 										) : (
@@ -1152,6 +1167,7 @@ export const Share = ({
 					 */}
 					{showRail && (
 						<aside
+							id={sidebarId}
 							className={clsx(
 								"shrink-0 px-4 pb-8 lg:p-0 lg:h-full lg:border-l lg:border-gray-5 lg:bg-white lg:overflow-hidden",
 								reduceMotion
@@ -1160,10 +1176,6 @@ export const Share = ({
 								railCollapsed ? "lg:w-0" : "lg:w-[22rem] xl:w-[24rem]",
 							)}
 						>
-							{/* Hidden rather than merely clipped while collapsed, so the
-						    panel's inputs leave the tab order. Scoped to lg: the
-						    stored preference is a desktop one and the phone layout
-						    shows the panel regardless. */}
 							<div
 								className={clsx(
 									"lg:h-full lg:w-[22rem] xl:w-[24rem]",
@@ -1171,6 +1183,7 @@ export const Share = ({
 								)}
 							>
 								<Sidebar
+									sidebarId={sidebarId}
 									data={sidebarData}
 									videoSettings={videoSettings}
 									commentsData={commentsData}
@@ -1191,20 +1204,6 @@ export const Share = ({
 								/>
 							</div>
 						</aside>
-					)}
-
-					{/* Only handle back to the panel once it's away. Sits on the edge
-					    it collapsed into, so the gesture reverses itself. */}
-					{showRail && railCollapsed && (
-						<button
-							type="button"
-							onClick={toggleRail}
-							aria-label={t("sidebar.showComments")}
-							title={t("sidebar.showComments")}
-							className="hidden fixed right-0 top-1/2 z-30 items-center justify-center -translate-y-1/2 rounded-l-lg border border-r-0 border-gray-5 bg-white h-16 w-6 text-gray-10 shadow-sm transition-colors hover:text-gray-12 lg:flex"
-						>
-							<ChevronGlyph direction="left" />
-						</button>
 					)}
 
 					{/* The phone copy of the footer: last in the stack, after the

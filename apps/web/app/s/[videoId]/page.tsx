@@ -12,6 +12,7 @@ import {
 	videoEdits,
 	videos,
 	videoUploads,
+	videoViewerGrants,
 } from "@cap/database/schema";
 import type { VideoMetadata } from "@cap/database/types";
 import { buildEnv, serverEnv } from "@cap/env";
@@ -57,6 +58,9 @@ import { getPublicShareVideo } from "@/lib/public-share-video";
 import * as EffectRuntime from "@/lib/server";
 import { runPromise } from "@/lib/server";
 import { getSharePageBranding } from "@/lib/share-branding";
+import { parseShareCallToAction } from "@/lib/share-call-to-action";
+import { getShareDashboardDestination } from "@/lib/share-dashboard-destination";
+import { getSharePlaybackUrl } from "@/lib/share-playback";
 import { buildShareVideoMetadata } from "@/lib/share-video-metadata";
 import { resolveShareWebUrl } from "@/lib/share-web-url";
 import { isVideoOverShareableLinkLimit } from "@/lib/shareable-link-quota";
@@ -69,10 +73,7 @@ import { transcribeVideo } from "@/lib/transcribe";
 import { isTranscriptionConfigured } from "@/lib/transcription-providers";
 import { t } from "@/lib/translations";
 import { canUserDownloadVideo } from "@/lib/video-download-permissions";
-import {
-	isEditSourceKey,
-	reconcileStaleEditUpload,
-} from "@/lib/video-edit-processing";
+import { isEditSourceKey } from "@/lib/video-edit-processing";
 import {
 	areEditSpecsEquivalent,
 	createIdentityEditSpec,
@@ -81,6 +82,7 @@ import { optionFromTOrFirst } from "@/utils/effect";
 import { isAiGenerationEnabled } from "@/utils/flags";
 import { PasswordOverlay } from "./_components/PasswordOverlay";
 import { PendingRecordingShare } from "./_components/PendingRecordingShare";
+import { PrivateAccessActions } from "./_components/PrivateAccessActions";
 import { ShareHeader } from "./_components/ShareHeader";
 import { Share } from "./Share";
 
@@ -183,7 +185,10 @@ async function getSharedSpacesForVideo(videoId: Video.VideoId) {
 		});
 	});
 
-	return sharedSpaces;
+	return {
+		sharedSpaces,
+		sharedOrganizations: orgSharing.map(({ id, name }) => ({ id, name })),
+	};
 }
 
 function TranslatedLink({
@@ -191,9 +196,7 @@ function TranslatedLink({
 	linkText,
 	href,
 }: {
-	translationKey:
-		| "share.signInToManageDescription"
-		| "share.emailRestrictionDescription";
+	translationKey: "share.emailRestrictionDescription";
 	linkText: string;
 	href: string;
 }) {
@@ -207,15 +210,15 @@ function TranslatedLink({
 	);
 }
 
-function PolicyDeniedView({ reason }: { reason?: string }) {
+function PolicyDeniedView({
+	reason,
+	videoId,
+}: {
+	reason?: string;
+	videoId: Video.VideoId;
+}) {
 	let title = t("share.videoPrivate");
-	let description: React.ReactNode = (
-		<TranslatedLink
-			translationKey="share.signInToManageDescription"
-			linkText={t("share.signInToManage")}
-			href="/login"
-		/>
-	);
+	let description: React.ReactNode = <PrivateAccessActions videoId={videoId} />;
 
 	if (reason === "email_restriction_login_required") {
 		title = t("share.requiresSignIn");
@@ -223,7 +226,7 @@ function PolicyDeniedView({ reason }: { reason?: string }) {
 			<TranslatedLink
 				translationKey="share.emailRestrictionDescription"
 				linkText={t("share.signInToManage")}
-				href="/login"
+				href={`/login?next=${encodeURIComponent(`/s/${videoId}`)}`}
 			/>
 		);
 	} else if (reason === "email_restriction_denied") {
@@ -237,13 +240,15 @@ function PolicyDeniedView({ reason }: { reason?: string }) {
 			<h1 className="mb-2 text-2xl font-semibold font-league-spartan">
 				{title}
 			</h1>
-			<p className="text-gray-400">{description}</p>
+			<div className="text-gray-400">{description}</div>
 		</div>
 	);
 }
 
 const renderPolicyDenied = (videoId: Video.VideoId, reason?: string) =>
-	Effect.succeed(<PolicyDeniedView key={videoId} reason={reason} />);
+	Effect.succeed(
+		<PolicyDeniedView key={videoId} videoId={videoId} reason={reason} />,
+	);
 
 const renderNoSuchElement = (awaitRecording: boolean) =>
 	awaitRecording
@@ -364,15 +369,13 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 	const awaitRecording =
 		isValidVideoIdParam(videoId) && hasRecordingStoppedParam(searchParams);
 
-	await reconcileStaleEditUpload(videoId);
-
 	return Effect.gen(function* () {
 		const videosPolicy = yield* VideosPolicy;
-
-		const [row] = yield* Effect.promise(() =>
+		const loadVideo = () =>
 			db()
 				.select({
 					id: videos.id,
+					folderId: videos.folderId,
 					name: videos.name,
 					orgId: videos.orgId,
 					createdAt: videos.createdAt,
@@ -404,6 +407,7 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 						organizationId: sharedVideos.organizationId,
 					},
 					orgSettings: organizations.settings,
+					allowedEmailDomain: organizations.allowedEmailDomain,
 					organizationName: organizations.name,
 					organizationIconUrl: organizations.iconUrl,
 					shareableLinkIconUrl: organizations.shareableLinkIconUrl,
@@ -422,13 +426,9 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 				.innerJoin(users, eq(videos.ownerId, users.id))
 				.leftJoin(videoUploads, eq(videos.id, videoUploads.videoId))
 				.leftJoin(organizations, eq(videos.orgId, organizations.id))
-				.where(eq(videos.id, videoId)),
-		);
+				.where(eq(videos.id, videoId));
+		const [row] = yield* Effect.promise(loadVideo);
 
-		// The access decision runs on the row already loaded above instead of
-		// re-reading it, and stays ahead of the tombstone check so a denied or
-		// password-gated video on a deleted org still resolves the way it did
-		// when the policy ran before the select.
 		if (row) {
 			yield* videosPolicy.canViewLoaded(row, Option.fromNullable(row.password));
 		}
@@ -472,7 +472,7 @@ async function AuthorizedContent({
 }: {
 	video: Omit<
 		InferSelectModel<typeof videos>,
-		"folderId" | "password" | "settings" | "ownerId"
+		"password" | "settings" | "ownerId"
 	> & {
 		owner: InferSelectModel<typeof users>;
 		sharedOrganization: { organizationId: Organisation.OrganisationId } | null;
@@ -480,6 +480,7 @@ async function AuthorizedContent({
 		hasActiveUpload: boolean;
 		activeUploadRawFileKey: string | null;
 		orgSettings?: OrganizationSettings | null;
+		allowedEmailDomain?: string | null;
 		videoSettings?: OrganizationSettings | null;
 		organizationName?: string | null;
 		organizationIconUrl?: ImageUpload.ImageUrlOrKey | null;
@@ -522,17 +523,16 @@ async function AuthorizedContent({
 		!hasActiveUpload &&
 		Date.now() - video.updatedAt.getTime() >= VIEW_NOTIFICATION_DELAY_MS;
 
-	if (user && video && user.id !== video.owner.id && canRegisterView) {
-		try {
-			await createNotification({
-				type: "view",
-				videoId: video.id,
-				authorId: user.id,
-			});
-		} catch (error) {
-			console.warn("Failed to create view notification:", error);
-		}
-	}
+	const viewNotificationPromise =
+		user && user.id !== video.owner.id && canRegisterView
+			? createNotification({
+					type: "view",
+					videoId: video.id,
+					authorId: user.id,
+				}).catch((error) => {
+					console.warn("Failed to create view notification:", error);
+				})
+			: Promise.resolve();
 
 	const userId = user?.id;
 	const commentId = optionFromTOrFirst(searchParams.comment).pipe(
@@ -554,6 +554,19 @@ async function AuthorizedContent({
 		: Promise.resolve(null);
 
 	const sharedSpacesPromise = getSharedSpacesForVideo(videoId);
+	const viewerCountPromise =
+		user?.id === video.owner.id
+			? db()
+					.select({ count: sql<number>`count(*)`.mapWith(Number) })
+					.from(videoViewerGrants)
+					.where(
+						and(
+							eq(videoViewerGrants.videoId, videoId),
+							isNull(videoViewerGrants.revokedAt),
+						),
+					)
+					.then(([row]) => row?.count ?? 0)
+			: Promise.resolve(0);
 
 	const ownerIsPro = userIsPro(video.owner);
 
@@ -572,18 +585,41 @@ async function AuthorizedContent({
 				);
 				return false;
 			});
+	const initialPlaybackUrlPromise =
+		!video.isScreenshot &&
+		!hasActiveUpload &&
+		(video.source.type === "desktopMP4" || video.source.type === "webMP4")
+			? overShareLimitPromise.then((overLimit) =>
+					overLimit ? null : getSharePlaybackUrl(video),
+				)
+			: undefined;
 
 	const aiGenerationEnabledPromise = isAiGenerationEnabled(video.owner);
+	const imagesPromise = Effect.gen(function* () {
+		const imageUploads = yield* ImageUploads;
+		const resolveImage = (
+			image: ImageUpload.ImageUrlOrKey | null | undefined,
+		) => (image ? imageUploads.resolveImageUrl(image) : Effect.succeed(null));
+		return yield* Effect.all(
+			{
+				owner: resolveImage(video.owner.image),
+				organization: resolveImage(video.organizationIconUrl),
+				shareableLink: resolveImage(video.shareableLinkIconUrl),
+			},
+			{ concurrency: 3 },
+		);
+	}).pipe(runPromise);
 
 	const screenshotImageUrlPromise = video.isScreenshot
 		? Effect.flatMap(Videos, (videos) => videos.getThumbnailURL(videoId)).pipe(
 				Effect.map(Option.getOrNull),
+				provideOptionalAuth,
 				runPromise,
 			)
 		: Promise.resolve(null);
 
 	const customDomainPromise = (async () => {
-		if (!user) {
+		if (!user || user.id !== video.owner.id) {
 			return { customDomain: null, domainVerified: false };
 		}
 		const activeOrganizationId = user.activeOrganizationId;
@@ -611,12 +647,6 @@ async function AuthorizedContent({
 		}
 		return { customDomain: null, domainVerified: false };
 	})();
-
-	const sharedOrganizationsPromise = db()
-		.select({ id: sharedVideos.organizationId, name: organizations.name })
-		.from(sharedVideos)
-		.innerJoin(organizations, eq(sharedVideos.organizationId, organizations.id))
-		.where(eq(sharedVideos.videoId, videoId));
 
 	const userOrganizationsPromise = (async () => {
 		if (!userId) return [];
@@ -730,8 +760,8 @@ async function AuthorizedContent({
 
 	const viewsPromise = getVideoAnalytics(videoId).then((v) => v.count);
 
-	const canManageSharePageBrandingPromise = (async () => {
-		if (!userId) return false;
+	const videoOrganizationRolePromise = (async () => {
+		if (!userId) return null;
 
 		const [organizationAccess] = await db()
 			.select({
@@ -754,15 +784,13 @@ async function AuthorizedContent({
 			)
 			.limit(1);
 
-		if (!organizationAccess) return false;
+		if (!organizationAccess) return null;
 
-		return canManageOrganizationSettings(
-			getEffectiveOrganizationRole({
-				userId,
-				ownerId: organizationAccess.ownerId,
-				memberRole: organizationAccess.memberRole,
-			}),
-		);
+		return getEffectiveOrganizationRole({
+			userId,
+			ownerId: organizationAccess.ownerId,
+			memberRole: organizationAccess.memberRole,
+		});
 	})();
 
 	const isVideoDownloadReady =
@@ -776,6 +804,21 @@ async function AuthorizedContent({
 					videoId,
 				})
 			: Promise.resolve(false);
+
+	const dashboardDestinationPromise = getShareDashboardDestination({
+		viewer: user
+			? { id: user.id, activeOrganizationId: user.activeOrganizationId }
+			: null,
+		videoId,
+		ownerId: video.owner.id,
+		videoOrganizationId: video.orgId,
+	}).catch((error) => {
+		console.error(
+			`[ShareVideoPage] Dashboard destination lookup failed for ${videoId}:`,
+			error,
+		);
+		return null;
+	});
 
 	const videoHasEditsPromise = canDownloadVideoPromise.then((canDownload) => {
 		if (!canDownload || video.isScreenshot) return false;
@@ -795,30 +838,35 @@ async function AuthorizedContent({
 
 	const [
 		spacesData,
-		sharedSpaces,
+		{ sharedSpaces, sharedOrganizations },
+		viewerCount,
 		aiGenerationEnabled,
 		screenshotImageUrl,
 		membersList,
 		userOrganizations,
-		sharedOrganizations,
 		{ customDomain, domainVerified },
-		canManageSharePageBranding,
+		videoOrganizationRole,
 		canDownloadVideo,
 		videoHasEdits,
 		ownerIsOverShareLimit,
+		resolvedImages,
+		dashboardDestination,
 	] = await Promise.all([
 		spacesDataPromise,
 		sharedSpacesPromise,
+		viewerCountPromise,
 		aiGenerationEnabledPromise,
 		screenshotImageUrlPromise,
 		membersListPromise,
 		userOrganizationsPromise,
-		sharedOrganizationsPromise,
 		customDomainPromise,
-		canManageSharePageBrandingPromise,
+		videoOrganizationRolePromise,
 		canDownloadVideoPromise,
 		videoHasEditsPromise,
 		overShareLimitPromise,
+		imagesPromise,
+		dashboardDestinationPromise,
+		viewNotificationPromise,
 	]);
 
 	const rules = resolveEffectiveVideoRules({
@@ -862,42 +910,35 @@ async function AuthorizedContent({
 		aiGenerationStatus,
 	};
 
-	const videoWithOrganizationInfo = await Effect.gen(function* () {
-		const imageUploads = yield* ImageUploads;
-
-		return {
-			...video,
-			hasActiveUpload,
-			ownerIsOverShareLimit,
-			owner: {
-				id: video.owner.id,
-				name: video.owner.name,
-				isPro: ownerIsPro,
-				image: video.owner.image
-					? yield* imageUploads.resolveImageUrl(video.owner.image)
-					: null,
-			},
-			organization: {
-				organizationMembers: membersList.map((member) => member.userId),
-				organizationId: video.sharedOrganization?.organizationId ?? undefined,
-			},
-			sharedOrganizations: sharedOrganizations,
-			password: null,
-			folderId: null,
-			orgSettings: video.orgSettings || null,
-			organizationName: video.organizationName,
-			organizationIconUrl: video.organizationIconUrl
-				? yield* imageUploads.resolveImageUrl(video.organizationIconUrl)
-				: null,
-			shareableLinkIconUrl: video.shareableLinkIconUrl
-				? yield* imageUploads.resolveImageUrl(video.shareableLinkIconUrl)
-				: null,
-			settings: rules.settings,
-			hasInheritedPassword: rules.hasInheritedPassword,
-			inheritedPasswordSources: rules.inheritedPasswordSources,
-			inheritedSpaceSettings: rules.inheritedSettings,
-		};
-	}).pipe(runPromise);
+	const videoWithOrganizationInfo = {
+		...video,
+		hasActiveUpload,
+		ownerIsOverShareLimit,
+		owner: {
+			id: video.owner.id,
+			name: video.owner.name,
+			isPro: ownerIsPro,
+			image: resolvedImages.owner,
+		},
+		organization: {
+			organizationMembers: membersList.map((member) => member.userId),
+			organizationId: video.sharedOrganization?.organizationId ?? undefined,
+		},
+		sharedOrganizations: sharedOrganizations,
+		password: null,
+		folderId: user?.id === video.owner.id ? video.folderId : null,
+		orgSettings: video.orgSettings || null,
+		organizationName: video.organizationName,
+		organizationIconUrl: resolvedImages.organization,
+		shareableLinkIconUrl: resolvedImages.shareableLink,
+		settings: rules.settings,
+		hasInheritedPassword: rules.hasInheritedPassword,
+		inheritedPasswordSources: rules.inheritedPasswordSources,
+		inheritedSpaceSettings: rules.inheritedSettings,
+		callToAction: ownerIsPro
+			? parseShareCallToAction(video.videoSettings)
+			: null,
+	};
 	const isEditProcessing =
 		isEditSourceKey({
 			ownerId: video.owner.id,
@@ -915,6 +956,8 @@ async function AuthorizedContent({
 			"timeline" && !video.isScreenshot
 			? ("timeline" as const)
 			: ("classic" as const);
+	const captionsInitiallyOff =
+		optionFromTOrFirst(searchParams.captions).pipe(Option.getOrNull) === "off";
 	// Recording media comments rides on the VIDEO OWNER's Pro plan; the
 	// upload/create paths re-check server-side via canUseMediaComments.
 	const canRecordMedia = Boolean(user) && videoWithOrganizationInfo.owner.isPro;
@@ -926,6 +969,9 @@ async function AuthorizedContent({
 			<Share
 				header={
 					<ShareHeader
+						canMoveToFolder={
+							user?.id === video.owner.id && videoOrganizationRole !== null
+						}
 						data={{
 							...videoWithOrganizationInfo,
 							createdAt: video.metadata?.customCreatedAt
@@ -934,28 +980,35 @@ async function AuthorizedContent({
 						}}
 						customDomain={customDomain}
 						domainVerified={domainVerified}
+						allowedEmailDomain={video.allowedEmailDomain}
 						sharedOrganizations={
 							videoWithOrganizationInfo.sharedOrganizations || []
 						}
 						sharedSpaces={sharedSpaces}
+						viewerCount={viewerCount}
 						userOrganizations={userOrganizations}
 						spacesData={spacesData}
 						branding={getSharePageBranding(videoWithOrganizationInfo)}
-						canManageSharePageBranding={canManageSharePageBranding}
+						canManageSharePageBranding={canManageOrganizationSettings(
+							videoOrganizationRole,
+						)}
 						canDownload={canDownloadVideo}
 						hasEdits={videoHasEdits}
 						// Caught separately from the copy the sidebar consumes: the
 						// header renders for everyone, and a failed count is worth
 						// less than the header it would otherwise take down.
 						views={viewsPromise.catch(() => null)}
+						dashboardDestination={dashboardDestination}
 					/>
 				}
+				dashboardDestination={dashboardDestination}
 				// The attribution and the legal links German hosting requires. A slot
 				// rather than markup after `Share`: on desktop the page is pinned to
 				// the viewport, so anything outside the scrolling video column would
 				// be clipped away.
 				footer={<ShareFooter />}
 				data={videoWithOrganizationInfo}
+				initialPlaybackUrl={initialPlaybackUrlPromise}
 				screenshotImageUrl={screenshotImageUrl}
 				videoSettings={videoWithOrganizationInfo.settings}
 				comments={commentsPromise}
@@ -966,6 +1019,7 @@ async function AuthorizedContent({
 				viewerId={user?.id ?? null}
 				viewerSignedIn={user !== null}
 				initialView={initialShareView}
+				captionsInitiallyOff={captionsInitiallyOff}
 				canRecordMedia={canRecordMedia}
 				isEditProcessing={isEditProcessing}
 				recordingStopped={recordingStopped}

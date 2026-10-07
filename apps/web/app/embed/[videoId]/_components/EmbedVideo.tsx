@@ -7,6 +7,7 @@ import { Avatar, Logo } from "@cap/ui";
 import type { ViewerSettings } from "@cap/web-backend";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranscript } from "hooks/use-transcript";
+import Image from "next/image";
 import {
 	forwardRef,
 	useEffect,
@@ -28,7 +29,15 @@ import {
 	type TranscriptEntry,
 } from "@/app/s/[videoId]/_components/utils/transcript-utils";
 import { OarisLogo } from "@/components/OarisLogo";
+import type { SharePageBranding } from "@/lib/share-branding";
+import type { ShareCallToAction } from "@/lib/share-call-to-action";
 import { usePlayerJsReceiver } from "./use-player-js-receiver";
+
+declare global {
+	interface Window {
+		MSStream: unknown;
+	}
+}
 
 const formatTime = (time: number) => {
 	const minutes = Math.floor(time / 60);
@@ -37,12 +46,6 @@ const formatTime = (time: number) => {
 		.toString()
 		.padStart(2, "0")}`;
 };
-
-declare global {
-	interface Window {
-		MSStream: unknown;
-	}
-}
 
 type CommentWithAuthor = typeof commentsSchema.$inferSelect & {
 	authorName: string | null;
@@ -54,31 +57,40 @@ export const EmbedVideo = forwardRef<
 		data: Omit<typeof videos.$inferSelect, "password"> & {
 			hasActiveUpload: boolean | undefined;
 		};
+		branding: SharePageBranding | null;
 		user: typeof userSelectProps | null;
 		comments: CommentWithAuthor[];
 		chapters?: { title: string; start: number }[];
 		ownerName?: string | null;
+		ownerImageUrl?: string | null;
 		autoplay?: boolean;
 		/** Seconds to open at, from the embed URL's `?t=`. */
 		startTime?: number | null;
 		minimal?: boolean;
+		defaultPlaybackSpeed?: number;
 		viewerSettings?: ViewerSettings | null;
 		showPlaybackStatusBadge?: boolean;
+		callToAction?: ShareCallToAction | null;
+		/** Fork: short-lived token that authorises a trusted-origin embed. */
 		embedToken?: string;
 	}
 >(
 	(
 		{
 			data,
+			branding,
 			user: _user,
 			comments: _comments,
 			chapters = [],
 			ownerName,
+			ownerImageUrl,
 			autoplay = false,
 			startTime = null,
 			minimal = false,
+			defaultPlaybackSpeed,
 			viewerSettings,
 			showPlaybackStatusBadge = false,
+			callToAction = null,
 			embedToken,
 		},
 		ref,
@@ -189,6 +201,8 @@ export const EmbedVideo = forwardRef<
 		}, [isActivelyRecording]);
 
 		let videoSrc: string;
+		// Fork: trusted-origin embeds authenticate the playlist with a token
+		// rather than the viewer's cookie, which a sandboxed iframe lacks.
 		const tokenParam = embedToken
 			? `&token=${encodeURIComponent(embedToken)}`
 			: "";
@@ -209,6 +223,8 @@ export const EmbedVideo = forwardRef<
 				data.source.type === "MediaConvert")
 		) {
 			videoSrc = `/api/playlist?userId=${data.ownerId}&videoId=${data.id}&videoType=master${tokenParam}`;
+		} else if (data.source.type === "MediaConvert") {
+			videoSrc = `/api/playlist?userId=${data.ownerId}&videoId=${data.id}&videoType=video${tokenParam}`;
 		} else {
 			videoSrc = `/api/playlist?userId=${data.ownerId}&videoId=${data.id}&videoType=video${tokenParam}`;
 		}
@@ -274,8 +290,10 @@ export const EmbedVideo = forwardRef<
 							captionsSrc={captionsDisabled ? "" : subtitleUrl || ""}
 							videoRef={videoRef}
 							autoplay={autoplay}
+							defaultPlaybackSpeed={defaultPlaybackSpeed}
 							enableCrossOrigin={enableCrossOrigin}
 							hasActiveUpload={data.hasActiveUpload}
+							callToAction={callToAction}
 						/>
 					) : (
 						<HLSVideoPlayer
@@ -288,60 +306,82 @@ export const EmbedVideo = forwardRef<
 							captionsSrc={captionsDisabled ? "" : subtitleUrl || ""}
 							videoRef={videoRef}
 							autoplay={autoplay}
+							defaultPlaybackSpeed={defaultPlaybackSpeed}
 							hasActiveUpload={data.hasActiveUpload}
 							isLiveSegments={isSegmentsSource}
+							callToAction={callToAction}
 						/>
 					)}
+				</div>
 
-					{!minimal && (
-						<AnimatePresence>
-							{!isPlaying && (
-								<div className="absolute top-3 left-3 z-10 space-y-2">
+				{!minimal && (
+					<AnimatePresence>
+						{!isPlaying && (
+							<div className="absolute top-3 left-3 z-10 space-y-2">
+								<motion.div
+									initial={{ opacity: 0, y: 10 }}
+									animate={{ opacity: 1, y: 0 }}
+									exit={{ opacity: 0, y: 10 }}
+									transition={{ duration: 0.3, delay: 0.2 }}
+									className="z-10 bg-black/50 backdrop-blur-md rounded-lg sm:rounded-xl px-2 py-1.5 sm:px-4 sm:py-3 border border-white/10 shadow-2xl"
+								>
+									<div className="flex gap-2 items-center sm:gap-3">
+										{ownerName && (
+											<Avatar
+												name={ownerName}
+												imageUrl={ownerImageUrl}
+												className="hidden flex-shrink-0 xs:flex xs:size-10"
+												letterClass="xs:text-base font-medium"
+											/>
+										)}
+										<div className="flex-1 min-w-0">
+											<a
+												href={`/s/${data.id}`}
+												target="_blank"
+												rel="noopener noreferrer"
+												className="block"
+												onClick={(e) => e.stopPropagation()}
+											>
+												<h1 className="text-xs max-w-[175px] xs:max-w-[300px] sm:max-w-[400px] font-semibold md:max-w-[500px] leading-tight text-white truncate transition-all duration-200 cursor-pointer sm:text-xl md:text-2xl hover:underline">
+													{data.name}
+												</h1>
+											</a>
+											<div className="flex items-center gap-1 sm:gap-2 mt-0.5 sm:mt-1">
+												{ownerName && (
+													<p className="text-xs font-medium text-gray-300 truncate sm:text-sm">
+														{ownerName}
+													</p>
+												)}
+												{ownerName && longestDuration > 0 && (
+													<>
+														<span className="text-xs text-gray-400">•</span>
+														<p className="text-xs text-gray-300 sm:text-sm">
+															{formatTime(longestDuration)}
+														</p>
+													</>
+												)}
+											</div>
+										</div>
+									</div>
+								</motion.div>
+								{branding?.type === "custom" ? (
 									<motion.div
 										initial={{ opacity: 0, y: 10 }}
 										animate={{ opacity: 1, y: 0 }}
 										exit={{ opacity: 0, y: 10 }}
-										transition={{ duration: 0.3, delay: 0.2 }}
-										className="z-10 bg-black/50 backdrop-blur-md rounded-lg sm:rounded-xl px-2 py-1.5 sm:px-4 sm:py-3 border border-white/10 shadow-2xl"
+										transition={{ duration: 0.3, delay: 0.1 }}
+										className="w-fit rounded-lg border border-white/10 bg-black/50 px-3 py-2 backdrop-blur-sm"
 									>
-										<div className="flex gap-2 items-center sm:gap-3">
-											{ownerName && (
-												<Avatar
-													name={ownerName}
-													className="hidden flex-shrink-0 xs:flex xs:size-10"
-													letterClass="xs:text-base font-medium"
-												/>
-											)}
-											<div className="flex-1 min-w-0">
-												<a
-													href={`/s/${data.id}`}
-													target="_blank"
-													rel="noopener noreferrer"
-													className="block"
-													onClick={(e) => e.stopPropagation()}
-												>
-													<h1 className="text-xs max-w-[175px] xs:max-w-[300px] sm:max-w-[400px] font-semibold md:max-w-[500px] leading-tight text-white truncate transition-all duration-200 cursor-pointer sm:text-xl md:text-2xl hover:underline">
-														{data.name}
-													</h1>
-												</a>
-												<div className="flex items-center gap-1 sm:gap-2 mt-0.5 sm:mt-1">
-													{ownerName && (
-														<p className="text-xs font-medium text-gray-300 truncate sm:text-sm">
-															{ownerName}
-														</p>
-													)}
-													{ownerName && longestDuration > 0 && (
-														<>
-															<span className="text-xs text-gray-400">•</span>
-															<p className="text-xs text-gray-300 sm:text-sm">
-																{formatTime(longestDuration)}
-															</p>
-														</>
-													)}
-												</div>
-											</div>
-										</div>
+										<Image
+											src={branding.imageUrl}
+											alt={`${branding.name} logo`}
+											width={160}
+											height={32}
+											unoptimized
+											className="h-8 w-auto max-w-40 object-contain"
+										/>
 									</motion.div>
+								) : branding?.type === "cap" ? (
 									<motion.button
 										initial={{ opacity: 0, y: 10 }}
 										animate={{ opacity: 1, y: 0 }}
@@ -359,12 +399,14 @@ export const EmbedVideo = forwardRef<
 										</span>
 										<Logo className="w-auto h-4" white={true} />
 									</motion.button>
-								</div>
-							)}
-						</AnimatePresence>
-					)}
-				</div>
+								) : null}
+							</div>
+						)}
+					</AnimatePresence>
+				)}
 
+				{/* Fork: the embed carries its own attribution bar — the title
+				    links back to the share page and the mark to oaris. */}
 				<div className="flex items-center justify-between px-3 py-2 bg-white flex-none">
 					<a
 						href={`/s/${data.id}`}
