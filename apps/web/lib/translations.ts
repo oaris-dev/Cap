@@ -174,7 +174,6 @@ const en = {
 	"share.removeWatermark": "Remove watermark",
 	"share.videoPrivate": "This video is private",
 	"share.signInToManage": "sign in",
-		"If you own this video, please {link} to manage sharing.",
 	"share.requiresSignIn": "This video requires sign-in",
 	"share.emailRestrictionDescription":
 		"The owner of this video has restricted access. Please {link} with an authorized email address to view.",
@@ -365,7 +364,6 @@ const de: Record<keyof typeof en, string> = {
 	"share.removeWatermark": "Wasserzeichen entfernen",
 	"share.videoPrivate": "Dieses Video ist privat",
 	"share.signInToManage": "anmelden",
-		"Wenn Sie dieses Video besitzen, {link} Sie sich bitte an, um die Freigabe zu verwalten.",
 	"share.requiresSignIn": "Für dieses Video ist eine Anmeldung erforderlich",
 	"share.emailRestrictionDescription":
 		"Der Eigentümer dieses Videos hat den Zugang eingeschränkt. Bitte {link} Sie sich mit einer autorisierten E-Mail-Adresse an.",
