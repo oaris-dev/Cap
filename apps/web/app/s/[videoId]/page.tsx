@@ -1006,7 +1006,13 @@ async function AuthorizedContent({
 				// rather than markup after `Share`: on desktop the page is pinned to
 				// the viewport, so anything outside the scrolling video column would
 				// be clipped away.
-				footer={<ShareFooter />}
+				footer={
+					<ShareFooter
+						showAttribution={
+							getSharePageBranding(videoWithOrganizationInfo)?.type === "cap"
+						}
+					/>
+				}
 				data={videoWithOrganizationInfo}
 				initialPlaybackUrl={initialPlaybackUrlPromise}
 				screenshotImageUrl={screenshotImageUrl}
@@ -1032,18 +1038,26 @@ async function AuthorizedContent({
 	);
 }
 
-function ShareFooter() {
+/**
+ * The attribution follows the organisation's branding choice — "Hide Cap logo"
+ * in Cap Settings hides it here too, which is what that toggle is understood
+ * to mean. The legal links are not branding and always render: Impressum and
+ * Datenschutz are required of a German host whatever the logo says.
+ */
+function ShareFooter({ showAttribution }: { showAttribution: boolean }) {
 	return (
 		<div className="flex flex-col gap-3 justify-center items-center py-3 mx-auto w-fit lg:flex-row lg:gap-5 lg:py-2">
-			<a
-				target="_blank"
-				href="https://cap.so"
-				rel="noopener"
-				className="flex justify-center items-center px-3 py-1.5 mx-auto space-x-2 bg-white rounded-full border border-gray-5 w-fit"
-			>
-				<span className="text-sm">{t("share.recordedWith")}</span>
-				<Logo className="w-14 h-auto" />
-			</a>
+			{showAttribution && (
+				<a
+					target="_blank"
+					href="https://cap.so"
+					rel="noopener"
+					className="flex justify-center items-center px-3 py-1.5 mx-auto space-x-2 bg-white rounded-full border border-gray-5 w-fit"
+				>
+					<span className="text-sm">{t("share.recordedWith")}</span>
+					<Logo className="w-14 h-auto" />
+				</a>
+			)}
 			<div className="flex gap-3 items-center text-xs text-gray-9">
 				<a
 					href="https://oaris.de/impressum"
