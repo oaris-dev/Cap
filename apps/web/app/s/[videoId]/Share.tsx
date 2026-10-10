@@ -1154,7 +1154,12 @@ export const Share = ({
 							{/* Desktop only: below `lg` the rail is stacked after this
 							    column, and a footer here would sit between the video and
 							    the comments. The phone copy renders after the rail. */}
-							{footer && <div className="hidden lg:block">{footer}</div>}
+							{footer && (
+								// mt-auto: the column is a flex parent, so without it the
+								// footer rides up under the video instead of sitting at the
+								// bottom of the scroll area.
+								<div className="hidden mt-auto lg:block">{footer}</div>
+							)}
 						</div>
 					</div>
 
