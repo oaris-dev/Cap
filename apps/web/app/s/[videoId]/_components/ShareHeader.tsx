@@ -155,8 +155,6 @@ const SIGNED_OUT_LINKS = [
 const TITLE_TEXT_CLASS =
 	"text-xl leading-7 font-normal sm:text-2xl sm:leading-8";
 
-const TITLE_PLACEHOLDER = "Cap title";
-
 const ACTION_BAR_BUTTON_CLASS =
 	"h-10 min-w-0 gap-1.5 rounded-full px-3 text-[13px] sm:h-8 sm:px-2.5 sm:text-xs";
 
@@ -481,7 +479,7 @@ export const ShareHeader = ({
 	const copyShareLink = (url: string) =>
 		copyRichVideoLink({
 			url,
-			title: displayTitle || "Cap Recording",
+			title: displayTitle || t("header.untitledRecording"),
 			previewImageUrl: videoPreviewImageUrl(webUrl, data.id),
 		});
 
@@ -699,11 +697,11 @@ export const ShareHeader = ({
 
 		try {
 			await hideShareableLinkCapLogo(data.orgId);
-			toast.success("Cap logo hidden");
+			toast.success(t("header.logoHidden"));
 			refresh();
 		} catch (error) {
 			toast.error(
-				error instanceof Error ? error.message : "Failed to hide Cap logo",
+				error instanceof Error ? error.message : t("header.logoHideFailed"),
 			);
 		} finally {
 			setIsHidingBranding(false);
@@ -803,7 +801,7 @@ export const ShareHeader = ({
 								<Button
 									variant="gray"
 									size="xs"
-									aria-label="Hide Cap logo"
+									aria-label={t("header.hideLogo")}
 									className="h-7 gap-1 whitespace-nowrap rounded-full px-2 text-[11px]"
 									disabled={isHidingBranding}
 									onClick={handleHideBranding}
@@ -998,7 +996,7 @@ export const ShareHeader = ({
 										)}
 									>
 										{(isEditing ? editValue : displayTitle) ||
-											TITLE_PLACEHOLDER}
+											t("header.titlePlaceholder")}
 									</span>
 									{isEditing ? (
 										<input
@@ -1011,8 +1009,8 @@ export const ShareHeader = ({
 											maxLength={255}
 											spellCheck={false}
 											autoComplete="off"
-											aria-label="Cap title"
-											placeholder={TITLE_PLACEHOLDER}
+											aria-label={t("header.titlePlaceholder")}
+											placeholder={t("header.titlePlaceholder")}
 											onChange={(e) => setEditValue(e.target.value)}
 											onBlur={handleTitleBlur}
 											onKeyDown={handleTitleKeyDown}
@@ -1157,15 +1155,19 @@ export const ShareHeader = ({
 													<Button
 														variant="dark"
 														size="xs"
-														aria-label="Manage Cap"
+														aria-label={t("header.manageVideo")}
 														className={clsx(ACTION_BAR_BUTTON_CLASS, "sm:px-3")}
 													>
 														<FontAwesomeIcon
 															className="size-3.5 shrink-0"
 															icon={faEllipsis}
 														/>
-														<span className="truncate sm:hidden">Manage</span>
-														<span className="hidden sm:inline">Manage Cap</span>
+														<span className="truncate sm:hidden">
+															{t("header.manage")}
+														</span>
+														<span className="hidden sm:inline">
+															{t("header.manageVideo")}
+														</span>
 													</Button>
 												</DropdownMenuTrigger>
 												<DropdownMenuContent
@@ -1322,7 +1324,9 @@ export const ShareHeader = ({
 															className="size-3"
 															icon={faTrash}
 														/>
-														<p className="text-sm text-inherit">Delete Cap</p>
+														<p className="text-sm text-inherit">
+															{t("header.deleteVideo")}
+														</p>
 													</DropdownMenuItem>
 												</DropdownMenuContent>
 											</DropdownMenu>

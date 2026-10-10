@@ -31,6 +31,14 @@ const en = {
 
 	"header.sharedWithYou": "Shared with you",
 	"header.shareVideo": "Share this video",
+	"header.titlePlaceholder": "Video title",
+	"header.untitledRecording": "Recording",
+	"header.manage": "Manage",
+	"header.manageVideo": "Manage video",
+	"header.deleteVideo": "Delete video",
+	"header.hideLogo": "Hide logo",
+	"header.logoHidden": "Logo hidden",
+	"header.logoHideFailed": "Failed to hide the logo",
 	"header.linkLimitedFree":
 		"Shareable links are limited to 5 mins on the free plan.",
 	"header.titleUpdateFailed": "Failed to update title - please try again.",
@@ -218,6 +226,14 @@ const de: Record<keyof typeof en, string> = {
 
 	"header.sharedWithYou": "Mit Ihnen geteilt",
 	"header.shareVideo": "Dieses Video teilen",
+	"header.titlePlaceholder": "Videotitel",
+	"header.untitledRecording": "Aufnahme",
+	"header.manage": "Verwalten",
+	"header.manageVideo": "Video verwalten",
+	"header.deleteVideo": "Video löschen",
+	"header.hideLogo": "Logo ausblenden",
+	"header.logoHidden": "Logo ausgeblendet",
+	"header.logoHideFailed": "Logo konnte nicht ausgeblendet werden",
 	"header.linkLimitedFree":
 		"Teilbare Links sind im kostenlosen Plan auf 5 Minuten begrenzt.",
 	"header.titleUpdateFailed":
