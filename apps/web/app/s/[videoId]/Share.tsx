@@ -773,7 +773,7 @@ export const Share = ({
 				 * Phones stack the two and scroll the document as normal.
 				 */}
 				<div className="flex flex-col flex-1 min-h-0 lg:flex-row">
-					<div className="flex flex-col flex-1 min-w-0 lg:overflow-y-auto">
+					<div className="flex flex-col flex-1 min-w-0">
 						{/* Gutters live here rather than on the page, so the rail can sit
 						    flush against the viewport edge while the video stays centred
 						    inside what's left. */}
@@ -1164,7 +1164,10 @@ export const Share = ({
 						<aside
 							id={sidebarId}
 							className={clsx(
-								"shrink-0 px-4 pb-8 lg:p-0 lg:h-full lg:border-l lg:border-gray-5 lg:bg-white lg:overflow-hidden",
+								// Fork: sticky + h-screen rather than h-full — the page is
+								// one scrolling document now, so the rail holds its own
+								// height and stays beside the video as the page scrolls.
+								"shrink-0 px-4 pb-8 lg:p-0 lg:self-start lg:sticky lg:top-0 lg:h-screen lg:border-l lg:border-gray-5 lg:bg-white lg:overflow-hidden",
 								reduceMotion
 									? undefined
 									: "lg:transition-[width] lg:duration-300 lg:ease-out",
@@ -1200,24 +1203,12 @@ export const Share = ({
 							</div>
 						</aside>
 					)}
-
-					{/* The phone copy of the footer: last in the stack, after the
-					    rail, where a page footer belongs. */}
-					{footer && <div className="px-4 lg:hidden">{footer}</div>}
 				</div>
 
-				{/*
-				 * Fork: Impressum and Datenschutz are legally required and have to be
-				 * findable, so on desktop the footer is a shrink-0 bar below both
-				 * panes rather than the last thing in the scrolling column. Inside
-				 * the column it landed on the bottom edge of a box capped at the
-				 * viewport, half-clipped behind ~14px of scroll nobody would guess
-				 * was there. Phones keep the copy above, in document flow.
-				 */}
+				{/* One footer for both breakpoints: the document scrolls everywhere
+				    now, so the bottom of the page is a real place to be. */}
 				{footer && (
-					<div className="hidden shrink-0 border-t border-gray-5 bg-white lg:block">
-						{footer}
-					</div>
+					<div className="px-4 border-t border-gray-5 bg-white">{footer}</div>
 				)}
 			</PlaybackProvider>
 		</CaptionProvider>
