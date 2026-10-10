@@ -1034,12 +1034,12 @@ async function AuthorizedContent({
 
 function ShareFooter() {
 	return (
-		<div className="flex flex-col gap-3 justify-center items-center pt-2 pb-6 mx-auto w-fit">
+		<div className="flex flex-col gap-3 justify-center items-center py-3 mx-auto w-fit lg:flex-row lg:gap-5 lg:py-2">
 			<a
 				target="_blank"
 				href="https://cap.so"
 				rel="noopener"
-				className="flex justify-center items-center px-4 py-2 mx-auto space-x-2 bg-white rounded-full border border-gray-5 w-fit"
+				className="flex justify-center items-center px-3 py-1.5 mx-auto space-x-2 bg-white rounded-full border border-gray-5 w-fit"
 			>
 				<span className="text-sm">{t("share.recordedWith")}</span>
 				<Logo className="w-14 h-auto" />

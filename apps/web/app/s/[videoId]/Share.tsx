@@ -1150,16 +1150,6 @@ export const Share = ({
 									</AnimatePresence>
 								</div>
 							</div>
-
-							{/* Desktop only: below `lg` the rail is stacked after this
-							    column, and a footer here would sit between the video and
-							    the comments. The phone copy renders after the rail. */}
-							{footer && (
-								// mt-auto: the column is a flex parent, so without it the
-								// footer rides up under the video instead of sitting at the
-								// bottom of the scroll area.
-								<div className="hidden mt-auto lg:block">{footer}</div>
-							)}
 						</div>
 					</div>
 
@@ -1215,6 +1205,20 @@ export const Share = ({
 					    rail, where a page footer belongs. */}
 					{footer && <div className="px-4 lg:hidden">{footer}</div>}
 				</div>
+
+				{/*
+				 * Fork: Impressum and Datenschutz are legally required and have to be
+				 * findable, so on desktop the footer is a shrink-0 bar below both
+				 * panes rather than the last thing in the scrolling column. Inside
+				 * the column it landed on the bottom edge of a box capped at the
+				 * viewport, half-clipped behind ~14px of scroll nobody would guess
+				 * was there. Phones keep the copy above, in document flow.
+				 */}
+				{footer && (
+					<div className="hidden shrink-0 border-t border-gray-5 bg-white lg:block">
+						{footer}
+					</div>
+				)}
 			</PlaybackProvider>
 		</CaptionProvider>
 	);
