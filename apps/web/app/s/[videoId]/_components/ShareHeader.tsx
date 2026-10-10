@@ -588,10 +588,15 @@ export const ShareHeader = ({
 	 */
 	const renderShareButton = (className?: string) => (
 		<Button
-			className={clsx("gap-1.5 px-3", className)}
+			className={clsx(
+				// Fork: oaris green rather than Cap blue. Plain utilities beat the
+				// variant here, the way PasswordOverlay already overrides it.
+				"gap-1.5 px-3 bg-[#3b7a6b] hover:bg-[#326b5d] border-[#326b5d] text-white",
+				className,
+			)}
 			size="xs"
 			variant="blue"
-			aria-label="Share this Cap"
+			aria-label={t("header.shareVideo")}
 			onClick={openShareLinkDialog}
 			onPointerEnter={() => {
 				void importShareLinkDialog();

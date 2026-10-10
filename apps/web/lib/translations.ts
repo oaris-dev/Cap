@@ -30,6 +30,7 @@ const en = {
 	"auth.privacyPolicy": "Privacy Policy",
 
 	"header.sharedWithYou": "Shared with you",
+	"header.shareVideo": "Share this video",
 	"header.linkLimitedFree":
 		"Shareable links are limited to 5 mins on the free plan.",
 	"header.titleUpdateFailed": "Failed to update title - please try again.",
@@ -216,6 +217,7 @@ const de: Record<keyof typeof en, string> = {
 	"auth.privacyPolicy": "Datenschutzrichtlinie",
 
 	"header.sharedWithYou": "Mit Ihnen geteilt",
+	"header.shareVideo": "Dieses Video teilen",
 	"header.linkLimitedFree":
 		"Teilbare Links sind im kostenlosen Plan auf 5 Minuten begrenzt.",
 	"header.titleUpdateFailed":
