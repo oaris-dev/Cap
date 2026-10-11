@@ -447,12 +447,15 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 			// 100vw, which overshoots by the scrollbar width on OSes with classic
 			// scrollbars; clipping here keeps the page from gaining a horizontal
 			// scroll without creating a new scroll container.
-			// Desktop pins the page to the viewport so the comments rail can run
-			// full height and the video column scrolls on its own; phones keep
-			// ordinary document flow.
+			//
+			// Fork: upstream pins this to the viewport on desktop so the comments
+			// rail can run full height, which leaves the page with two detached
+			// scroll areas and no document bottom to put a footer at. One
+			// scrolling document instead; the rail stays beside the video by
+			// being sticky rather than by the page being frozen.
 			<div
 				key={videoId}
-				className="flex overflow-x-clip flex-col min-h-screen bg-[oklch(0.992_0.005_78.25)] font-lexend lg:h-screen lg:min-h-0 lg:overflow-hidden"
+				className="flex overflow-x-clip flex-col min-h-screen bg-[oklch(0.992_0.005_78.25)] font-lexend"
 			>
 				<PasswordOverlay isOpen={data.needsPassword} videoId={videoId} />
 				{!data.needsPassword && (
