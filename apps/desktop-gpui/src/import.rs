@@ -25,6 +25,8 @@ use cap_project::{
 use ffmpeg::{ChannelLayout, codec as avcodec, format as avformat};
 use gpui::{App, Global};
 
+use crate::i18n::tr;
+
 /// `import.rs:38-44` in the Tauri binary.
 pub const VIDEO_IMPORT_EXTENSIONS: &[&str] =
     &["mp4", "mov", "avi", "mkv", "webm", "wmv", "m4v", "flv"];
@@ -134,6 +136,7 @@ fn imported_video_meta(
                         start_time: Some(0.0),
                         device_id: None,
                         gap_summary: None,
+                        digital_silence_ms: None,
                     }),
                     cursor: None,
                     keyboard: None,
@@ -256,9 +259,9 @@ fn apply_progress(update: ImportProgress, cx: &mut App) {
     repaint_main_window(cx);
 }
 
-/// The refresh seam a finished import rides: the Recents carousel and the
-/// settings Recordings page (`refresh_library_after_delete`), the open library
-/// panel, and the tray's Previous submenu.
+/// The refresh seam a finished import rides: the Recents carousel, the
+/// settings Recordings page and the tray's Previous submenu
+/// (`refresh_library_after_delete`), and the open library panel.
 fn refresh_libraries(cx: &mut App) {
     if !cx.has_global::<crate::app_windows::AppWindows>() {
         return;
@@ -267,7 +270,6 @@ fn refresh_libraries(cx: &mut App) {
     let main = cx.global::<crate::app_windows::AppWindows>().main;
     main.update(cx, |view, window, cx| view.refresh_open_library(window, cx))
         .ok();
-    crate::tray::refresh_previous(cx);
 }
 
 /// The main window is rarely the active window while an import ticks, and an
@@ -292,7 +294,11 @@ pub fn pick_and_import_video(cx: &mut App) {
     cx.spawn(async move |cx| {
         // Blocking modal, so from a spawned task with no borrow held -- the
         // `save_file_panel` rule.
-        let Some(path) = pick_import_file(&[("Video Files", VIDEO_IMPORT_EXTENSIONS)], cx).await
+        let Some(path) = pick_import_file(
+            &[(tr::import::filter::video(), VIDEO_IMPORT_EXTENSIONS)],
+            cx,
+        )
+        .await
         else {
             return;
         };
@@ -303,7 +309,11 @@ pub fn pick_and_import_video(cx: &mut App) {
 
 pub fn pick_and_import_image(cx: &mut App) {
     cx.spawn(async move |cx| {
-        let Some(path) = pick_import_file(&[("Image Files", IMAGE_IMPORT_EXTENSIONS)], cx).await
+        let Some(path) = pick_import_file(
+            &[(tr::import::filter::image(), IMAGE_IMPORT_EXTENSIONS)],
+            cx,
+        )
+        .await
         else {
             return;
         };
@@ -318,9 +328,9 @@ pub fn pick_and_import_media(cx: &mut App) {
     cx.spawn(async move |cx| {
         let Some(path) = pick_import_file(
             &[
-                ("Media Files", MEDIA_IMPORT_EXTENSIONS),
-                ("Video Files", VIDEO_IMPORT_EXTENSIONS),
-                ("Image Files", IMAGE_IMPORT_EXTENSIONS),
+                (tr::import::filter::media(), MEDIA_IMPORT_EXTENSIONS),
+                (tr::import::filter::video(), VIDEO_IMPORT_EXTENSIONS),
+                (tr::import::filter::image(), IMAGE_IMPORT_EXTENSIONS),
             ],
             cx,
         )
@@ -334,7 +344,7 @@ pub fn pick_and_import_media(cx: &mut App) {
             cx.update(|cx| import_image_from_path(path, cx));
         } else {
             tracing::error!(path = %path.display(), "unsupported media import path");
-            show_error_dialog("Unsupported media file.".to_string());
+            show_error_dialog(tr::import::unsupported().to_string());
         }
     })
     .detach();
@@ -362,6 +372,7 @@ fn spawn_import(cx: &mut App, work: impl FnOnce(flume::Sender<ImportProgress>) +
     let in_flight = InFlightImport::begin();
     let worker = std::thread::Builder::new()
         .name("cap-media-import".to_string())
+        .stack_size(crate::MEDIA_THREAD_STACK_SIZE)
         .spawn(move || {
             let _in_flight = in_flight;
             work(tx);
@@ -425,12 +436,15 @@ fn show_import_error(kind: ImportKind, message: &str) {
         ImportKind::Image => "image",
     };
     tracing::error!("failed to import {media}: {message}");
-    show_error_dialog(format!("Failed to import {media}: {message}"));
+    show_error_dialog(match kind {
+        ImportKind::Video => tr::import::video_failed(message),
+        ImportKind::Image => tr::import::image_failed(message),
+    });
 }
 
 fn show_error_dialog(description: String) {
     let _ = rfd::MessageDialog::new()
-        .set_title("Import Error")
+        .set_title(tr::import::error_title())
         .set_description(description)
         .set_level(rfd::MessageLevel::Error)
         .set_buttons(rfd::MessageButtons::Ok)
@@ -477,7 +491,7 @@ fn run_video_import(source_path: &Path, tx: &flume::Sender<ImportProgress>) {
         pretty_name: &project_name,
     };
 
-    sink.send(ImportStage::Probing, 0.0, "Analyzing video file...");
+    sink.send(ImportStage::Probing, 0.0, tr::import::progress::analyzing());
     match probe_video_can_decode(source_path) {
         Ok(true) => {}
         Ok(false) => {
@@ -533,7 +547,11 @@ fn run_video_import(source_path: &Path, tx: &flume::Sender<ImportProgress>) {
         return;
     }
 
-    sink.send(ImportStage::Converting, 0.0, "Starting conversion...");
+    sink.send(
+        ImportStage::Converting,
+        0.0,
+        tr::import::progress::starting(),
+    );
     let result = transcode_video(
         source_path,
         &output_video_path,
@@ -543,7 +561,7 @@ fn run_video_import(source_path: &Path, tx: &flume::Sender<ImportProgress>) {
             sink.send(
                 ImportStage::Converting,
                 progress,
-                &format!("Converting video... {}%", (progress * 100.0) as u32),
+                &tr::import::progress::converting((progress * 100.0) as u32),
             );
         },
         None,
@@ -582,7 +600,7 @@ fn run_video_import(source_path: &Path, tx: &flume::Sender<ImportProgress>) {
     sink.send(
         ImportStage::Finalizing,
         0.95,
-        "Creating project metadata...",
+        tr::import::progress::metadata(),
     );
 
     // `import.rs:1490-1504`: an Opus file this small is headers with no
@@ -617,7 +635,7 @@ fn run_video_import(source_path: &Path, tx: &flume::Sender<ImportProgress>) {
         tracing::warn!("could not write the imported video's thumbnail: {error}");
     }
 
-    sink.send(ImportStage::Complete, 1.0, "Import complete!");
+    sink.send(ImportStage::Complete, 1.0, tr::import::progress::complete());
     tracing::info!(path = %project_path.display(), "video import complete");
 }
 
@@ -664,7 +682,7 @@ fn run_image_import(source_path: &Path, tx: &flume::Sender<ImportProgress>) {
         pretty_name: &project_name,
     };
 
-    sink.send(ImportStage::Probing, 0.0, "Importing image...");
+    sink.send(ImportStage::Probing, 0.0, tr::import::progress::image());
 
     let (width, height, rgba) = match decode_image_rgba(source_path) {
         Ok(decoded) => decoded,
@@ -728,7 +746,7 @@ fn run_image_import(source_path: &Path, tx: &flume::Sender<ImportProgress>) {
         return;
     }
 
-    sink.send(ImportStage::Complete, 1.0, "Import complete!");
+    sink.send(ImportStage::Complete, 1.0, tr::import::progress::complete());
     tracing::info!(path = %project_path.display(), "image import complete");
 }
 
@@ -831,6 +849,16 @@ fn h264_bitrate(width: u32, height: u32, frame_rate: f32) -> usize {
     let frame_rate_multiplier = ((f64::from(frame_rate) - 30.0).max(0.0) * 0.6) + 30.0;
     let area = f64::from(width) * f64::from(height);
     (area * frame_rate_multiplier * 0.3) as usize
+}
+
+fn frame_duration_ticks(time_base: ffmpeg::Rational, fps: u32) -> i64 {
+    let ticks = f64::from(time_base.denominator())
+        / (f64::from(time_base.numerator().max(1)) * f64::from(fps.max(1)));
+    (ticks.round() as i64).max(1)
+}
+
+fn import_decode_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |count| count.get().min(8))
 }
 
 pub(crate) fn transcode_editor_video(
@@ -963,10 +991,15 @@ fn transcode_video(
             .ok_or("No video stream found in file")?
             .parameters(),
     )
-    .map_err(|e| format!("Failed to create decoder: {e}"))?
-    .decoder()
-    .video()
     .map_err(|e| format!("Failed to create decoder: {e}"))?;
+    video_decoder.set_threading(ffmpeg::threading::Config {
+        kind: ffmpeg::threading::Type::Frame,
+        count: import_decode_threads(),
+    });
+    let mut video_decoder = video_decoder
+        .decoder()
+        .video()
+        .map_err(|e| format!("Failed to create decoder: {e}"))?;
     if strict {
         video_decoder.check(ffmpeg::codec::decoder::Check::EXPLODE);
     }
@@ -1291,6 +1324,7 @@ struct H264Output {
     stream_index: usize,
     pixel_format: avformat::Pixel,
     packet: ffmpeg::Packet,
+    frame_duration: i64,
     first_pts: Option<i64>,
     last_frame_pts: Option<i64>,
     last_written_dts: Option<i64>,
@@ -1354,12 +1388,14 @@ fn open_h264_encoder(
                     fps,
                     "import H264 encoder ready"
                 );
+                let frame_duration = frame_duration_ticks(encoder.time_base(), fps);
                 return Ok(H264Output {
                     strict: false,
                     encoder,
                     stream_index,
                     pixel_format,
                     packet: ffmpeg::Packet::empty(),
+                    frame_duration,
                     first_pts: None,
                     last_frame_pts: None,
                     last_written_dts: None,
@@ -1399,6 +1435,10 @@ fn open_h264_with_codec(
         "libx264" => {
             options.set("preset", "veryfast");
             options.set("tune", "zerolatency");
+            // zerolatency also switches x264 to sliced threads, which encode one
+            // frame at a time. An offline import can take frame threads' few
+            // frames of delay; the stream stays free of B-frames and lookahead.
+            options.set("x264-params", "sliced-threads=0");
             options.set("g", &keyframe_interval);
             options.set("keyint_min", &keyframe_interval);
         }
@@ -1479,6 +1519,12 @@ impl H264Output {
             "Video encode",
         )? {
             self.packet.set_stream(self.stream_index);
+            // Encoders leave this at 0, and the mp4 muxer then gives the last
+            // sample no duration, so the edit list ends one frame early and
+            // players discard the final frame.
+            if self.packet.duration() <= 0 {
+                self.packet.set_duration(self.frame_duration);
+            }
             self.packet.rescale_ts(
                 self.encoder.time_base(),
                 output.stream(self.stream_index).unwrap().time_base(),
@@ -1776,12 +1822,7 @@ fn decode_image_rgba(source_path: &Path) -> Result<(u32, u32, Vec<u8>), String> 
 }
 
 fn decode_image_with_image_crate(source_path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
-    let image = image::ImageReader::open(source_path)
-        .map_err(|e| format!("Failed to open image: {e}"))?
-        .with_guessed_format()
-        .map_err(|e| format!("Failed to detect image format: {e}"))?
-        .decode()
-        .map_err(|e| format!("Failed to decode image: {e}"))?;
+    let image = cap_gpui_kernels::codec::decode_image_file(source_path)?;
 
     let (width, height) = (image.width(), image.height());
     check_image_dimensions(width, height)?;
@@ -1855,11 +1896,14 @@ fn decode_image_with_ffmpeg(source_path: &Path) -> Result<(u32, u32, Vec<u8>), S
     let height_usize = height as usize;
     let src_stride = rgba_frame.stride(0);
     let row_bytes = width_usize * 4;
-    let mut buffer = vec![0u8; height_usize * row_bytes];
-    for y in 0..height_usize {
-        let src = &rgba_frame.data(0)[y * src_stride..y * src_stride + row_bytes];
-        buffer[y * row_bytes..(y + 1) * row_bytes].copy_from_slice(src);
-    }
+    let buffer = cap_gpui_kernels::frame::copy_rows(
+        rgba_frame.data(0),
+        row_bytes,
+        src_stride,
+        height_usize,
+        false,
+    )
+    .ok_or_else(|| "Failed to decode image".to_string())?;
 
     Ok((width, height, buffer))
 }
@@ -1868,13 +1912,16 @@ fn decode_image_with_ffmpeg(source_path: &Path) -> Result<(u32, u32, Vec<u8>), S
 fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     let file = std::fs::File::create(path)
         .map_err(|e| format!("Failed to create imported image file: {e}"))?;
-    let encoder = image::codecs::png::PngEncoder::new_with_quality(
-        std::io::BufWriter::new(file),
+    cap_gpui_kernels::codec::write_png_file(
+        file,
+        rgba,
+        width,
+        height,
+        image::ColorType::Rgba8.into(),
         image::codecs::png::CompressionType::Default,
         image::codecs::png::FilterType::Adaptive,
-    );
-    image::ImageEncoder::write_image(encoder, rgba, width, height, image::ColorType::Rgba8.into())
-        .map_err(|e| format!("Failed to encode imported image: {e}"))
+    )
+    .map_err(|e| format!("Failed to encode imported image: {e}"))
 }
 
 #[cfg(test)]
@@ -2080,6 +2127,154 @@ mod tests {
         assert_eq!(converted.pts(), Some(819));
         assert_ne!(converted.data(0).as_ptr(), original.data(0).as_ptr());
     }
+
+    fn count_video_packets(path: &Path) -> usize {
+        let mut input = avformat::input(path).unwrap();
+        let index = input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .unwrap()
+            .index();
+        input
+            .packets()
+            .filter(|(stream, _)| stream.index() == index)
+            .count()
+    }
+
+    fn decoded_video_frames(path: &Path) -> usize {
+        let mut input = avformat::input(path).unwrap();
+        let stream = input.streams().best(ffmpeg::media::Type::Video).unwrap();
+        let index = stream.index();
+        let mut decoder = avcodec::Context::from_parameters(stream.parameters())
+            .unwrap()
+            .decoder()
+            .video()
+            .unwrap();
+        let mut frame = ffmpeg::frame::Video::empty();
+        let mut frames = 0;
+        for (stream, packet) in input.packets() {
+            if stream.index() == index {
+                decoder.send_packet(&packet).unwrap();
+                while decoder.receive_frame(&mut frame).is_ok() {
+                    frames += 1;
+                }
+            }
+        }
+        decoder.send_eof().unwrap();
+        while decoder.receive_frame(&mut frame).is_ok() {
+            frames += 1;
+        }
+        frames
+    }
+
+    fn decoded_audio_seconds(path: &Path) -> f64 {
+        let mut input = avformat::input(path).unwrap();
+        let stream = input.streams().best(ffmpeg::media::Type::Audio).unwrap();
+        let index = stream.index();
+        let mut decoder = avcodec::Context::from_parameters(stream.parameters())
+            .unwrap()
+            .decoder()
+            .audio()
+            .unwrap();
+        let mut frame = ffmpeg::frame::Audio::empty();
+        let mut samples = 0;
+        for (stream, packet) in input.packets() {
+            if stream.index() == index {
+                decoder.send_packet(&packet).unwrap();
+                while decoder.receive_frame(&mut frame).is_ok() {
+                    samples += frame.samples();
+                }
+            }
+        }
+        decoder.send_eof().unwrap();
+        while decoder.receive_frame(&mut frame).is_ok() {
+            samples += frame.samples();
+        }
+        samples as f64 / f64::from(decoder.rate())
+    }
+
+    #[test]
+    fn a_completed_conversion_keeps_every_source_frame_and_the_audio() {
+        ffmpeg::init().unwrap();
+        let root = temp_dir("complete-conversion");
+        let source = root.join("source.mp4");
+        std::fs::write(
+            &source,
+            include_bytes!("../../media-server/src/__tests__/fixtures/test-with-audio.mp4"),
+        )
+        .unwrap();
+        std::fs::write(root.join("recording-meta.json"), b"{}").unwrap();
+        let output = root.join("display.mp4");
+        let audio = root.join("audio.ogg");
+
+        let (fps, sample_rate) =
+            transcode_video(&source, &output, Some(&audio), &root, &|_| {}, None).unwrap();
+
+        assert_eq!(fps, 25);
+        assert!(sample_rate.is_some());
+        assert_eq!(count_video_packets(&source), 25);
+        assert_eq!(count_video_packets(&output), 25);
+        assert_eq!(decoded_video_frames(&output), 25);
+        let duration = media_duration(&output).unwrap().as_secs_f64();
+        assert!((duration - 1.0).abs() < 0.01, "{duration}");
+        let audio_seconds = decoded_audio_seconds(&audio);
+        assert!((0.9..=1.1).contains(&audio_seconds), "{audio_seconds}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `CAP_IMPORT_BENCH_SOURCES=a.mp4,b.mp4 cargo test --bin cap-gpui benchmark_video_import -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benchmark: transcodes the videos named by CAP_IMPORT_BENCH_SOURCES"]
+    fn benchmark_video_import() {
+        ffmpeg::init().unwrap();
+        let sources = std::env::var("CAP_IMPORT_BENCH_SOURCES")
+            .expect("CAP_IMPORT_BENCH_SOURCES must list the videos to import");
+        let runs = std::env::var("CAP_IMPORT_BENCH_RUNS")
+            .ok()
+            .and_then(|runs| runs.parse::<usize>().ok())
+            .unwrap_or(3)
+            .max(1);
+
+        println!("| source | duration | median import | slowest | realtime |");
+        println!("| --- | ---: | ---: | ---: | ---: |");
+        for source in sources.split(',').map(PathBuf::from) {
+            let duration = media_duration(&source)
+                .expect("benchmark source has a duration")
+                .as_secs_f64();
+            let mut seconds = (0..runs)
+                .map(|_| {
+                    let root = temp_dir("bench");
+                    std::fs::write(root.join("recording-meta.json"), b"{}").unwrap();
+                    let started = std::time::Instant::now();
+                    transcode_video(
+                        &source,
+                        &root.join("display.mp4"),
+                        Some(&root.join("audio.ogg")),
+                        &root,
+                        &|_| {},
+                        None,
+                    )
+                    .unwrap();
+                    let elapsed = started.elapsed().as_secs_f64();
+                    std::fs::remove_dir_all(root).unwrap();
+                    elapsed
+                })
+                .collect::<Vec<_>>();
+            seconds.sort_by(f64::total_cmp);
+            let middle = seconds.len() / 2;
+            let median = if seconds.len() % 2 == 0 {
+                (seconds[middle - 1] + seconds[middle]) / 2.0
+            } else {
+                seconds[middle]
+            };
+            println!(
+                "| {} | {duration:.1} s | {median:.2} s | {:.2} s | {:.2}x |",
+                source.file_name().unwrap().to_string_lossy(),
+                seconds[seconds.len() - 1],
+                duration / median,
+            );
+        }
+    }
 }
 
 pub(crate) struct ImportedEditorImage {
@@ -2093,7 +2288,6 @@ pub(crate) fn import_editor_image(
     project_path: &Path,
     source: &Path,
 ) -> Result<ImportedEditorImage, String> {
-    use image::ImageDecoder;
     use std::{
         hash::BuildHasher,
         io::{Read, Write},
@@ -2114,39 +2308,7 @@ pub(crate) fn import_editor_image(
     if encoded.len() as u64 > MAX_BYTES {
         return Err("Image files must be 64 MiB or smaller".into());
     }
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(&encoded))
-        .with_guessed_format()
-        .map_err(|error| error.to_string())?;
-    let extension = match reader.format() {
-        Some(image::ImageFormat::Png) => "png",
-        Some(image::ImageFormat::Jpeg) => "jpg",
-        Some(image::ImageFormat::WebP) => "webp",
-        Some(image::ImageFormat::Gif) => "gif",
-        Some(image::ImageFormat::Bmp) => "bmp",
-        _ => return Err("Choose a PNG, JPEG, WebP, GIF or BMP image".into()),
-    };
-    let mut limits = image::Limits::default();
-    limits.max_alloc = Some(128 * 1024 * 1024);
-    limits.max_image_width = Some(32_768);
-    limits.max_image_height = Some(32_768);
-    reader.limits(limits);
-    let mut decoder = reader.into_decoder().map_err(|error| {
-        format!("Cannot decode image (maximum 32,768 pixels per side): {error}")
-    })?;
-    let (source_width, source_height) = decoder.dimensions();
-    if source_width == 0
-        || source_height == 0
-        || u64::from(source_width) * u64::from(source_height) > 16_777_216
-        || decoder.total_bytes() > 128 * 1024 * 1024
-    {
-        return Err("Images must have at most 16,777,216 pixels (32,768 per side) and decode to at most 128 MiB".into());
-    }
-    let orientation = decoder.orientation().map_err(|error| error.to_string())?;
-    let mut decoded = image::DynamicImage::from_decoder(decoder)
-        .map_err(|error| format!("Cannot decode image: {error}"))?;
-    decoded.apply_orientation(orientation);
-    let (width, height) = (decoded.width(), decoded.height());
-    drop(decoded);
+    let (extension, width, height) = cap_gpui_kernels::codec::inspect_overlay_image(&encoded)?;
     let mut bytes = [0u8; 16];
     for chunk in bytes.chunks_exact_mut(8) {
         chunk.copy_from_slice(

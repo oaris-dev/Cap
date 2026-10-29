@@ -6,9 +6,9 @@ mod linux_camera;
 #[cfg(target_os = "linux")]
 pub use linux_camera::{
     LINUX_CAMERA_MAX_MASK_AGE, LinuxCameraBlur, LinuxCameraEffect, LinuxCameraMaskReceipt,
-    LinuxCameraPresentation, LinuxCameraPresentationError, LinuxCameraProcessing,
-    LinuxCameraPublisher, LinuxCameraRect, LinuxCameraShape, LinuxProcessedCameraFrame,
-    LinuxProcessedCameraSource,
+    LinuxCameraPixels, LinuxCameraPresentation, LinuxCameraPresentationError,
+    LinuxCameraProcessing, LinuxCameraPublisher, LinuxCameraRect, LinuxCameraShape,
+    LinuxProcessedCameraFrame, LinuxProcessedCameraSource,
 };
 
 use crate::{
@@ -710,6 +710,11 @@ async fn create_pipeline(
     start_time: Timestamps,
     start_gate: Option<RecordingStartGate>,
 ) -> anyhow::Result<Pipeline> {
+    // Instant merges its screen and audio tracks by timestamp, and gated
+    // audio starts at the arm point, so the screen must start there too.
+    if let Some(gate) = &start_gate {
+        gate.set_video_origin_at_arm();
+    }
     let ScreenPipelineInput {
         source: screen_capture,
         info: screen_info,
@@ -764,6 +769,7 @@ async fn create_pipeline(
             .with_timestamps(start_time)
             .with_start_gate(start_gate.clone())
             .build::<crate::ffmpeg::SegmentedVideoMuxer>(crate::ffmpeg::SegmentedVideoMuxerConfig {
+                timed_fragments: false,
                 segment_duration: std::time::Duration::from_secs(2),
                 preset: cap_enc_ffmpeg::h264::H264Preset::Ultrafast,
                 output_size: Some(output_resolution),
@@ -789,8 +795,14 @@ async fn create_pipeline(
         let mut builder = output_pipeline::OutputPipeline::builder(audio_dir.clone())
             .with_timestamps(start_time)
             .with_start_gate(start_gate.clone());
-        #[cfg(target_os = "linux")]
-        {
+        // Behind a start gate, zero is the gate's arm time, which the screen
+        // track also starts at (within a frame), not the first audio sample:
+        // a mic that becomes ready late, or loopback system audio that
+        // delivers only while sound plays, would otherwise move all audio
+        // early. Without a gate the screen starts at its first encoded frame,
+        // after capture setup, so the epoch would put audio late instead;
+        // only Linux, whose video also starts at the epoch, anchors there.
+        if start_gate.is_some() || cfg!(target_os = "linux") {
             builder = builder.with_audio_anchor(output_pipeline::AudioAnchor::PipelineEpoch);
         }
 
@@ -810,6 +822,7 @@ async fn create_pipeline(
                 output_pipeline::DashSegmentedAudioMuxerConfig {
                     shared_pause_state: None,
                     segment_tx: segment_tx_for_audio,
+                    write_behind: cfg!(target_os = "macos"),
                     ..Default::default()
                 },
             )
@@ -846,6 +859,7 @@ impl Actor {
 pub struct ActorBuilder {
     output_path: PathBuf,
     capture_target: ScreenCaptureTarget,
+    window_only: bool,
     system_audio: bool,
     mic_feed: Option<Arc<MicrophoneFeedLock>>,
     camera_feed: Option<Arc<crate::feeds::camera::CameraFeedLock>>,
@@ -871,6 +885,7 @@ impl ActorBuilder {
         Self {
             output_path: output,
             capture_target,
+            window_only: false,
             system_audio: false,
             mic_feed: None,
             camera_feed: None,
@@ -906,6 +921,15 @@ impl ActorBuilder {
 
     pub fn with_system_audio(mut self, system_audio: bool) -> Self {
         self.system_audio = system_audio;
+        self
+    }
+
+    /// Record only the target window, following it, on macOS and Windows.
+    /// Ignored while a camera is attached there: Instant has no camera
+    /// compositing on those platforms, so the camera bubble only reaches
+    /// the video because the screen capture records it.
+    pub fn with_window_only(mut self, window_only: bool) -> Self {
+        self.window_only = window_only;
         self
     }
 
@@ -973,6 +997,7 @@ impl ActorBuilder {
             self.output_path,
             RecordingBaseInputs {
                 capture_target: self.capture_target,
+                window_only: self.window_only,
                 capture_system_audio: self.system_audio,
                 mic_feed: self.mic_feed,
                 camera_feed: self.camera_feed,
@@ -1324,6 +1349,13 @@ async fn build_instant_recording_actor(
             #[cfg(not(target_os = "macos"))]
             let max_capture_size = None;
 
+            #[cfg(any(target_os = "macos", windows))]
+            let capture_window = instant_capture_window(
+                &inputs.capture_target,
+                inputs.window_only,
+                inputs.camera_feed.is_some(),
+            );
+
             let screen_source = ScreenCaptureConfig::<ScreenCaptureMethod>::init(
                 display,
                 crop_bounds,
@@ -1332,6 +1364,8 @@ async fn build_instant_recording_actor(
                 max_capture_size,
                 timestamps.system_time(),
                 inputs.capture_system_audio,
+                #[cfg(any(target_os = "macos", windows))]
+                capture_window,
                 #[cfg(target_os = "linux")]
                 crate::sources::screen_capture::LinuxCaptureSource::from_target(
                     &inputs.capture_target,
@@ -1554,9 +1588,36 @@ fn clamp_size(input: (u32, u32), max: (u32, u32)) -> (u32, u32) {
     }
 }
 
+// Instant mode on macOS and Windows has no camera compositing: the camera
+// preview only reaches the video because the display capture records it, so a
+// window-only capture would drop it.
+#[cfg(any(target_os = "macos", windows))]
+fn instant_capture_window(
+    target: &ScreenCaptureTarget,
+    window_only: bool,
+    camera_attached: bool,
+) -> Option<scap_targets::WindowId> {
+    crate::window_only_target(target, window_only).filter(|_| !camera_attached)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn instant_captures_the_window_only_when_asked_and_without_a_camera() {
+        let id: scap_targets::WindowId = "247".parse().unwrap();
+        let window = ScreenCaptureTarget::Window { id: id.clone() };
+
+        assert_eq!(instant_capture_window(&window, true, false), Some(id));
+        assert_eq!(instant_capture_window(&window, true, true), None);
+        assert_eq!(instant_capture_window(&window, false, false), None);
+        assert_eq!(
+            instant_capture_window(&ScreenCaptureTarget::CameraOnly, true, false),
+            None
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

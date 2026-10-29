@@ -46,7 +46,9 @@ use crate::editor_sidebar::{
     self, BACKGROUND_COLORS, BACKGROUND_IMAGE_EXTENSIONS, BACKGROUND_THEMES, DEFAULT_GRADIENT_FROM,
     DEFAULT_GRADIENT_TO, GRADIENT_PRESETS, color_to_hsla, hex_to_rgb,
 };
+use crate::i18n::tr;
 use crate::screenshot_annotations::{self as annotations, AnnotationState, Tool};
+use crate::theme::LocaleFont as _;
 use crate::theme::Theme;
 use crate::ui;
 
@@ -133,21 +135,21 @@ pub(crate) fn bundle_image_path(bundle: &Path) -> Option<PathBuf> {
 /// Read `original.png` (or the first PNG in the bundle), the recording meta
 /// and the project config -- the disk half of `create_standalone_instance`.
 pub fn load_source(bundle: &Path) -> Result<LoadedSource, String> {
-    let image_path =
-        bundle_image_path(bundle).ok_or_else(|| format!("No PNG found in {}", bundle.display()))?;
+    let image_path = bundle_image_path(bundle)
+        .ok_or_else(|| tr::screenshot_editor::error::no_image(bundle.display()))?;
 
-    let image = image::open(&image_path).map_err(|e| format!("Failed to open image: {e}"))?;
+    let image = image::open(&image_path).map_err(tr::screenshot_editor::error::open_image)?;
     let (width, height) = (image.width(), image.height());
     if width > MAX_DIMENSION || height > MAX_DIMENSION {
-        return Err(format!("Image dimensions exceed maximum: {width}x{height}"));
+        return Err(tr::screenshot_editor::error::too_large(width, height));
     }
 
-    let meta = RecordingMeta::load_for_project(bundle)
-        .map_err(|e| format!("Failed to load screenshot meta: {e}"))?;
+    let meta =
+        RecordingMeta::load_for_project(bundle).map_err(tr::screenshot_editor::error::load_meta)?;
     let studio_meta = match &meta.inner {
         RecordingMetaInner::Studio(inner) => (**inner).clone(),
         RecordingMetaInner::Instant(_) => {
-            return Err("Not a screenshot bundle".to_string());
+            return Err(tr::screenshot_editor::error::not_screenshot().to_string());
         }
     };
     let config = ProjectConfiguration::load(bundle).unwrap_or_default();
@@ -204,16 +206,21 @@ pub async fn run_still_renderer(
         preserve_screen_alpha: true,
     };
 
-    let constants = match RenderVideoConstants::new_with_options(
-        options,
-        source.meta,
-        source.studio_meta,
-    )
-    .await
-    {
+    let constants = match match crate::app_windows::shared_wgpu_device().await {
+        Some(shared) => Ok(RenderVideoConstants::from_shared_device(
+            shared,
+            options,
+            source.studio_meta,
+            source.meta,
+            Arc::new(cap_rendering::BackgroundTextureCache::default()),
+        )),
+        None => {
+            RenderVideoConstants::new_with_options(options, source.meta, source.studio_meta).await
+        }
+    } {
         Ok(constants) => constants,
         Err(error) => {
-            let _ = setup_tx.send(Err(format!("The GPU renderer failed to start: {error}")));
+            let _ = setup_tx.send(Err(tr::screenshot_editor::error::renderer_failed(error)));
             return;
         }
     };
@@ -314,7 +321,7 @@ async fn render_still(
 
     let uniforms = ProjectUniforms::new(
         constants,
-        config,
+        &Arc::new(config.clone()),
         0,
         30,
         resolution_base,
@@ -391,12 +398,9 @@ async fn render_export_rgba(
             frame.height
         ));
     }
-    let rgba: Vec<u8> = frame
-        .data
-        .chunks(padded)
-        .take(frame.height as usize)
-        .flat_map(|row| row[..row_bytes].iter().copied())
-        .collect();
+    let rgba =
+        cap_gpui_kernels::frame::unpad_rows(&frame.data, row_bytes, padded, frame.height as usize)
+            .ok_or_else(|| "Invalid export buffer rows".to_string())?;
 
     // What the preview renders this config at: `get_base_size`, then the
     // uniforms' own alignment -- `get_output_size` at scale 1. That is what
@@ -477,12 +481,25 @@ enum BgTab {
 }
 
 impl BgTab {
-    const ALL: [(Self, &'static str); 4] = [
-        (Self::Wallpaper, "Wallpaper"),
-        (Self::Image, "Image"),
-        (Self::Color, "Color"),
-        (Self::Gradient, "Gradient"),
-    ];
+    const ALL: [Self; 4] = [Self::Wallpaper, Self::Image, Self::Color, Self::Gradient];
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Wallpaper => "Wallpaper",
+            Self::Image => "Image",
+            Self::Color => "Color",
+            Self::Gradient => "Gradient",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Wallpaper => tr::screenshot_editor::background::wallpaper(),
+            Self::Image => tr::screenshot_editor::background::image(),
+            Self::Color => tr::screenshot_editor::background::color(),
+            Self::Gradient => tr::screenshot_editor::background::gradient(),
+        }
+    }
 
     fn for_source(source: &BackgroundSource) -> Self {
         match source {
@@ -540,11 +557,11 @@ impl Popover {
 
     fn tooltip(self) -> &'static str {
         match self {
-            Self::Background => "Background",
-            Self::Padding => "Padding",
-            Self::Rounding => "Corner Rounding",
-            Self::Shadow => "Shadow",
-            Self::Border => "Border",
+            Self::Background => tr::screenshot_editor::style::background(),
+            Self::Padding => tr::screenshot_editor::style::padding(),
+            Self::Rounding => tr::screenshot_editor::style::corner_rounding(),
+            Self::Shadow => tr::screenshot_editor::style::shadow(),
+            Self::Border => tr::screenshot_editor::style::border(),
         }
     }
 
@@ -903,18 +920,18 @@ pub struct ScreenshotEditorWindow {
     /// `projectHistory` (`context.tsx:549-659`), reusing the video editor's.
     pub(crate) history: ProjectHistory,
     revision: u64,
+    render_gate: RenderInputGate,
     config_tx: Option<tokio::sync::watch::Sender<ConfigUpdate>>,
     export_tx: Option<tokio::sync::mpsc::Sender<ExportRequest>>,
     /// One export at a time: the copy/save buttons grey out while the GPU
     /// renders.
     exporting: bool,
     export_status: ExportStatus,
-    /// The latest GPU frame, already BGRA in gpui's atlas format.
-    frame: Option<Arc<RenderImage>>,
-    /// The same frame as tight RGBA. `Preview.tsx` reads the preview canvas
-    /// back to blur/pixelate mask regions (`:537-687`); the mask overlay
-    /// resamples this instead of the atlas image.
-    pub(crate) frame_rgba: Option<Arc<Vec<u8>>>,
+    /// The latest GPU frame, already BGRA in gpui's atlas format. `Preview.tsx`
+    /// reads the preview canvas back to blur/pixelate mask regions
+    /// (`:537-687`); the mask overlay resamples these same pixels.
+    pub(crate) frame: Option<Arc<RenderImage>>,
+    pub(crate) mask_frame_revision: u64,
     pub(crate) frame_size: (f32, f32),
     /// `originalImageSize` -- the source PNG's dimensions, which the crop
     /// button gates on and the frame-space transform needs.
@@ -993,12 +1010,13 @@ impl ScreenshotEditorWindow {
             project: ProjectConfiguration::default(),
             history: ProjectHistory::new(ProjectConfiguration::default()),
             revision: 0,
+            render_gate: RenderInputGate::default(),
             config_tx: None,
             export_tx: None,
             exporting: false,
             export_status: ExportStatus::Idle,
             frame: None,
-            frame_rgba: None,
+            mask_frame_revision: 0,
             frame_size: (1., 1.),
             image_size: None,
             previous_transform: None,
@@ -1093,6 +1111,7 @@ impl ScreenshotEditorWindow {
             .set_open(config.background.border.as_ref().is_some_and(|b| b.enabled));
         self.history = ProjectHistory::new(config.clone());
         self.project = config;
+        self.render_gate = RenderInputGate::published(&mut self.project);
         self.image_size = Some(image_size);
         self.config_tx = Some(config_tx);
         self.export_tx = Some(export_tx);
@@ -1100,7 +1119,7 @@ impl ScreenshotEditorWindow {
         if self.bg_tab == BgTab::Wallpaper {
             self.ensure_wallpapers(cx);
         }
-        self.ensure_background_image(cx);
+        self.ensure_background_image(window, cx);
         if let Ok(dest) = std::env::var("CAP_GPUI_AUTO_SCREENSHOT_EXPORT")
             && !dest.trim().is_empty()
         {
@@ -1119,7 +1138,6 @@ impl ScreenshotEditorWindow {
     pub fn frame_arrived(
         &mut self,
         image: Arc<RenderImage>,
-        rgba: Arc<Vec<u8>>,
         size: (u32, u32),
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1127,7 +1145,10 @@ impl ScreenshotEditorWindow {
         let next = (size.0.max(1) as f32, size.1.max(1) as f32);
         self.rescale_annotations_for(next);
         self.frame_size = next;
-        self.frame_rgba = Some(rgba);
+        self.mask_frame_revision = self
+            .mask_frame_revision
+            .checked_add(1)
+            .expect("frame revision");
         self.ready = true;
         if let Some(previous) = self.frame.replace(image) {
             let _ = window.drop_image(previous);
@@ -1204,6 +1225,9 @@ impl ScreenshotEditorWindow {
         let Some(config_tx) = &self.config_tx else {
             return;
         };
+        if !self.render_gate.admit(&mut self.project) {
+            return;
+        }
         self.revision += 1;
         let _ = config_tx.send(ConfigUpdate {
             revision: self.revision,
@@ -1257,7 +1281,7 @@ impl ScreenshotEditorWindow {
         {
             self.selected_annotation = None;
         }
-        self.ensure_background_image(cx);
+        self.ensure_background_image(window, cx);
         self.publish();
         self.schedule_save(window, cx);
         self.refresh_mask_overlays(window, cx);
@@ -1491,9 +1515,11 @@ impl ScreenshotEditorWindow {
 
     /// The Image tab's `h-48` preview. Decoded off-thread and cached by path,
     /// so switching tabs does not re-read the file.
-    fn ensure_background_image(&mut self, cx: &mut Context<Self>) {
+    fn ensure_background_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let BackgroundSource::Image { path: Some(path) } = &self.project.background.source else {
-            self.bg_image = None;
+            if let Some((_, previous)) = self.bg_image.take() {
+                let _ = window.drop_image(previous);
+            }
             return;
         };
         if self
@@ -1504,7 +1530,7 @@ impl ScreenshotEditorWindow {
             return;
         }
         let path = path.clone();
-        self.bg_image_task = Some(cx.spawn(async move |this, cx| {
+        self.bg_image_task = Some(cx.spawn_in(window, async move |this, cx| {
             let decoded = cx
                 .background_executor()
                 .spawn({
@@ -1512,8 +1538,11 @@ impl ScreenshotEditorWindow {
                     async move { decode_preview_image(Path::new(&path)) }
                 })
                 .await;
-            this.update(cx, |this, cx| {
-                this.bg_image = decoded.map(|image| (path, image));
+            this.update_in(cx, |this, window, cx| {
+                let next = decoded.map(|image| (path, image));
+                if let Some((_, previous)) = std::mem::replace(&mut this.bg_image, next) {
+                    let _ = window.drop_image(previous);
+                }
                 cx.notify();
             })
             .ok();
@@ -1522,7 +1551,19 @@ impl ScreenshotEditorWindow {
 
     fn pick_background_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
-            let Some(path) = crate::platform::open_image_panel(&BACKGROUND_IMAGE_EXTENSIONS) else {
+            #[cfg(target_os = "linux")]
+            let picked = crate::platform::open_file_panel_async(
+                &[(
+                    tr::screenshot_editor::background::image_files(),
+                    &BACKGROUND_IMAGE_EXTENSIONS[..],
+                )],
+                None,
+                cx,
+            )
+            .await;
+            #[cfg(not(target_os = "linux"))]
+            let picked = crate::platform::open_image_panel(&BACKGROUND_IMAGE_EXTENSIONS);
+            let Some(path) = picked else {
                 return;
             };
             this.update_in(cx, |this, window, cx| {
@@ -1536,7 +1577,7 @@ impl ScreenshotEditorWindow {
                     window,
                     cx,
                 );
-                this.ensure_background_image(cx);
+                this.ensure_background_image(window, cx);
             })
             .ok();
         })
@@ -1921,10 +1962,10 @@ impl ScreenshotEditorWindow {
             let rendered = if export_tx.send(request).await.is_ok() {
                 match reply_rx.await {
                     Ok(result) => result,
-                    Err(_) => Err("The renderer stopped before the export finished".into()),
+                    Err(_) => Err(tr::screenshot_editor::error::renderer_stopped().into()),
                 }
             } else {
-                Err("The screenshot renderer is not running".into())
+                Err(tr::screenshot_editor::error::renderer_not_running().into())
             };
 
             // The canvas pass counts as "rendering" over there too
@@ -1968,11 +2009,17 @@ impl ScreenshotEditorWindow {
             match result {
                 Ok(bytes) => match destination {
                     ExportDestination::Clipboard => {
+                        let image = cx
+                            .background_executor()
+                            .spawn(async move { crate::platform::prepare_clipboard_image(bytes) })
+                            .await;
                         this.update_in(cx, |this, window, cx| {
-                            match crate::platform::copy_image_bytes_to_clipboard(&bytes, cx) {
+                            match image
+                                .and_then(|image| crate::platform::write_clipboard_image(image, cx))
+                            {
                                 Ok(()) => {
                                     this.toast_success(
-                                        "Screenshot copied to clipboard!",
+                                        tr::screenshot_editor::toast::copied(),
                                         window,
                                         cx,
                                     );
@@ -2003,7 +2050,11 @@ impl ScreenshotEditorWindow {
                             match written {
                                 Ok(()) => {
                                     this.update_in(cx, |this, window, cx| {
-                                        this.toast_success("Screenshot saved!", window, cx)
+                                        this.toast_success(
+                                            tr::screenshot_editor::toast::saved(),
+                                            window,
+                                            cx,
+                                        )
                                     })
                                     .ok();
                                 }
@@ -2083,7 +2134,7 @@ impl ScreenshotEditorWindow {
         self.toast_update(
             toast,
             ToastKind::Success,
-            "Share link copied to clipboard",
+            tr::screenshot_editor::toast::link_copied(),
             window,
             cx,
         );
@@ -2115,7 +2166,7 @@ impl ScreenshotEditorWindow {
         };
         self.exporting = true;
         self.export_status = ExportStatus::Encoding;
-        let toast = self.toast_loading("Preparing upload", cx);
+        let toast = self.toast_loading(tr::screenshot_editor::share::preparing(), cx);
         cx.notify();
 
         let config = self.project.clone();
@@ -2143,7 +2194,7 @@ impl ScreenshotEditorWindow {
                 .background_executor()
                 .spawn(async move {
                     RecordingMeta::load_for_project(&meta_bundle)
-                        .map_err(|error| format!("Failed to load screenshot metadata: {error}"))
+                        .map_err(tr::screenshot_editor::error::load_metadata)
                 })
                 .await;
             let mut meta = match meta {
@@ -2175,7 +2226,7 @@ impl ScreenshotEditorWindow {
                 this.share_progress(
                     toast,
                     ExportStatus::Rendering,
-                    "Rendering screenshot",
+                    tr::screenshot_editor::share::rendering(),
                     window,
                     cx,
                 );
@@ -2189,10 +2240,10 @@ impl ScreenshotEditorWindow {
             let rendered = if export_tx.send(request).await.is_ok() {
                 match reply_rx.await {
                     Ok(result) => result,
-                    Err(_) => Err("The renderer stopped before the export finished".into()),
+                    Err(_) => Err(tr::screenshot_editor::error::renderer_stopped().into()),
                 }
             } else {
-                Err("The screenshot renderer is not running".into())
+                Err(tr::screenshot_editor::error::renderer_not_running().into())
             };
             let raw = match rendered {
                 Ok(raw) => raw,
@@ -2215,7 +2266,7 @@ impl ScreenshotEditorWindow {
                 this.share_progress(
                     toast,
                     ExportStatus::Encoding,
-                    "Preparing upload",
+                    tr::screenshot_editor::share::preparing(),
                     window,
                     cx,
                 );
@@ -2244,7 +2295,7 @@ impl ScreenshotEditorWindow {
                 this.share_progress(
                     toast,
                     ExportStatus::Uploading,
-                    "Uploading screenshot",
+                    tr::screenshot_editor::share::uploading(),
                     window,
                     cx,
                 );
@@ -2258,7 +2309,7 @@ impl ScreenshotEditorWindow {
             });
             let outcome = match upload.await {
                 Ok(outcome) => outcome,
-                Err(error) => Err(format!("The upload task failed: {error}")),
+                Err(error) => Err(tr::screenshot_editor::error::upload_task(error)),
             };
 
             let uploaded = match outcome {
@@ -2267,10 +2318,13 @@ impl ScreenshotEditorWindow {
                     this.update_in(cx, |this, window, cx| {
                         this.finish_share_error(
                             toast,
-                            "You need to sign in to create shareable links".into(),
+                            tr::screenshot_editor::error::sign_in_to_share().into(),
                             window,
                             cx,
-                        )
+                        );
+                        crate::sign_in::SignIn::global(cx).update(cx, |sign_in, cx| {
+                            sign_in.start(crate::sign_in::SignInOrigin::ScreenshotEditor, cx)
+                        });
                     })
                     .ok();
                     return;
@@ -2279,7 +2333,7 @@ impl ScreenshotEditorWindow {
                     this.update_in(cx, |this, window, cx| {
                         this.finish_share_error(
                             toast,
-                            "This feature requires an upgraded plan".into(),
+                            tr::screenshot_editor::error::upgrade_required().into(),
                             window,
                             cx,
                         )
@@ -2309,7 +2363,7 @@ impl ScreenshotEditorWindow {
                 .background_executor()
                 .spawn(async move {
                     meta.save_for_project()
-                        .map_err(|error| format!("Error saving project: {error}"))
+                        .map_err(tr::screenshot_editor::error::save_project)
                 })
                 .await;
 
@@ -2329,9 +2383,9 @@ impl ScreenshotEditorWindow {
         cx.spawn_in(window, async move |_this, cx| {
             if !crate::platform::confirm_dialog(
                 "Cap",
-                "Are you sure you want to delete this screenshot?",
-                "Yes",
-                "No",
+                tr::main::delete_screenshot_confirm(),
+                tr::common::yes(),
+                tr::common::no(),
                 false,
             ) {
                 return;
@@ -2355,20 +2409,31 @@ impl ScreenshotEditorWindow {
 
     // -- Aspect ratio -------------------------------------------------------
 
-    const ASPECT_OPTIONS: [(Option<cap_project::AspectRatio>, &'static str); 6] = [
-        (None, "Auto"),
-        (Some(cap_project::AspectRatio::Wide), "Wide ⋅16:9"),
-        (Some(cap_project::AspectRatio::Vertical), "Vertical ⋅9:16"),
-        (Some(cap_project::AspectRatio::Square), "Square ⋅1:1"),
-        (Some(cap_project::AspectRatio::Classic), "Classic ⋅4:3"),
-        (Some(cap_project::AspectRatio::Tall), "Tall ⋅3:4"),
+    const ASPECT_OPTIONS: [Option<cap_project::AspectRatio>; 6] = [
+        None,
+        Some(cap_project::AspectRatio::Wide),
+        Some(cap_project::AspectRatio::Vertical),
+        Some(cap_project::AspectRatio::Square),
+        Some(cap_project::AspectRatio::Classic),
+        Some(cap_project::AspectRatio::Tall),
     ];
+
+    fn aspect_option_label(value: &Option<cap_project::AspectRatio>) -> &'static str {
+        match value {
+            None => tr::screenshot_editor::aspect::auto(),
+            Some(cap_project::AspectRatio::Wide) => tr::screenshot_editor::aspect::wide(),
+            Some(cap_project::AspectRatio::Vertical) => tr::screenshot_editor::aspect::vertical(),
+            Some(cap_project::AspectRatio::Square) => tr::screenshot_editor::aspect::square(),
+            Some(cap_project::AspectRatio::Classic) => tr::screenshot_editor::aspect::classic(),
+            Some(cap_project::AspectRatio::Tall) => tr::screenshot_editor::aspect::tall(),
+        }
+    }
 
     /// `KSelect.Value` (`AspectRatioSelect.tsx:78-88`) -- the trigger shows the
     /// bare ratio, not the option's name.
     fn aspect_label(&self) -> &'static str {
         match &self.project.aspect_ratio {
-            None => "Auto",
+            None => tr::screenshot_editor::aspect::auto(),
             Some(cap_project::AspectRatio::Wide) => "16:9",
             Some(cap_project::AspectRatio::Vertical) => "9:16",
             Some(cap_project::AspectRatio::Square) => "1:1",
@@ -2380,15 +2445,18 @@ impl ScreenshotEditorWindow {
     fn aspect_menu_items(&self) -> Vec<ui::MenuItem> {
         Self::ASPECT_OPTIONS
             .iter()
-            .map(|(value, label)| {
-                ui::MenuItem::new(*label, aspect_eq(value, &self.project.aspect_ratio))
+            .map(|value| {
+                ui::MenuItem::new(
+                    Self::aspect_option_label(value),
+                    aspect_eq(value, &self.project.aspect_ratio),
+                )
             })
             .collect()
     }
 
     fn choose_aspect(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        let Some((next, _)) = Self::ASPECT_OPTIONS.get(index) else {
+        let Some(next) = Self::ASPECT_OPTIONS.get(index) else {
             return;
         };
         let next = next.clone();
@@ -2405,29 +2473,33 @@ impl ScreenshotEditorWindow {
         );
     }
 
-    const CORNER_STYLES: [(CornerStyle, &'static str); 2] = [
-        (CornerStyle::Squircle, "Squircle"),
-        (CornerStyle::Rounded, "Rounded"),
-    ];
+    const CORNER_STYLES: [CornerStyle; 2] = [CornerStyle::Squircle, CornerStyle::Rounded];
+
+    fn corner_style_name(style: CornerStyle) -> &'static str {
+        match style {
+            CornerStyle::Squircle => tr::screenshot_editor::corner::squircle(),
+            CornerStyle::Rounded => tr::screenshot_editor::corner::rounded(),
+        }
+    }
 
     fn corner_style_label(&self) -> &'static str {
-        match self.project.background.rounding_type {
-            CornerStyle::Squircle => "Squircle",
-            CornerStyle::Rounded => "Rounded",
-        }
+        Self::corner_style_name(self.project.background.rounding_type)
     }
 
     fn menu_items(&self, kind: MenuKind) -> Vec<ui::MenuItem> {
         match kind {
             MenuKind::Aspect => self.aspect_menu_items(),
             MenuKind::More => vec![
-                ui::MenuItem::new("Open Folder", false),
-                ui::MenuItem::new("Delete", false),
+                ui::MenuItem::new(tr::screenshot_editor::menu::open_folder(), false),
+                ui::MenuItem::new(tr::screenshot_editor::menu::delete(), false),
             ],
             MenuKind::CornerStyle => Self::CORNER_STYLES
                 .iter()
-                .map(|(style, label)| {
-                    ui::MenuItem::new(*label, *style == self.project.background.rounding_type)
+                .map(|style| {
+                    ui::MenuItem::new(
+                        Self::corner_style_name(*style),
+                        *style == self.project.background.rounding_type,
+                    )
                 })
                 .collect(),
         }
@@ -2442,7 +2514,7 @@ impl ScreenshotEditorWindow {
             MenuKind::More => {
                 self.menu = None;
                 match index {
-                    0 => crate::library::reveal_in_folder(&self.bundle.join("original.png")),
+                    0 => crate::library::reveal_path(&self.bundle.join("original.png"), cx),
                     1 => self.delete_screenshot(window, cx),
                     _ => {}
                 }
@@ -2450,7 +2522,7 @@ impl ScreenshotEditorWindow {
             }
             MenuKind::CornerStyle => {
                 self.menu = None;
-                let Some((style, _)) = Self::CORNER_STYLES.get(index) else {
+                let Some(style) = Self::CORNER_STYLES.get(index) else {
                     return;
                 };
                 let style = *style;
@@ -2709,7 +2781,7 @@ impl ScreenshotEditorWindow {
                 &theme,
                 "screenshot-layers-toggle",
                 "icons/layers.svg",
-                "Layers",
+                tr::screenshot_editor::layers::title(),
                 "L",
                 layers_open,
                 cx.listener(|this, _, _window, cx| {
@@ -2721,7 +2793,7 @@ impl ScreenshotEditorWindow {
             .children(Tool::ALL.map(|tool| {
                 tool_button(
                     &theme,
-                    gpui::SharedString::from(format!("screenshot-tool-{}", tool.label())),
+                    gpui::SharedString::from(format!("screenshot-tool-{}", tool.id())),
                     tool.icon(),
                     tool.label(),
                     tool.shortcut(),
@@ -2740,10 +2812,10 @@ impl ScreenshotEditorWindow {
         let crop_enabled = self.image_size.is_some();
         let exporting = self.exporting;
         let share_tooltip = match self.export_status {
-            ExportStatus::Rendering => "Rendering screenshot",
-            ExportStatus::Encoding => "Preparing upload",
-            ExportStatus::Uploading => "Uploading screenshot",
-            ExportStatus::Idle => "Create shareable link",
+            ExportStatus::Rendering => tr::screenshot_editor::share::rendering(),
+            ExportStatus::Encoding => tr::screenshot_editor::share::preparing(),
+            ExportStatus::Uploading => tr::screenshot_editor::share::uploading(),
+            ExportStatus::Idle => tr::screenshot_editor::share::create_link(),
         };
 
         let tools = div()
@@ -2767,7 +2839,7 @@ impl ScreenshotEditorWindow {
                                 .as_ref()
                                 .is_some_and(|(kind, _)| *kind == MenuKind::Aspect),
                         )
-                        .tooltip(&theme, "Aspect Ratio")
+                        .tooltip(&theme, tr::screenshot_editor::header::aspect_ratio())
                         .on_click(cx.listener(|this, _, window, cx| {
                             cx.stop_propagation();
                             this.toggle_menu(MenuKind::Aspect, Anchor::Aspect, window, cx);
@@ -2779,7 +2851,7 @@ impl ScreenshotEditorWindow {
                     .left_icon("icons/crop.svg")
                     .icon_size(px(16.))
                     .disabled(!crop_enabled)
-                    .tooltip(&theme, "Crop Image")
+                    .tooltip(&theme, tr::screenshot_editor::header::crop_image())
                     .on_click(cx.listener(|this, _, window, cx| {
                         cx.stop_propagation();
                         this.open_crop_dialog(window, cx);
@@ -2877,7 +2949,7 @@ impl ScreenshotEditorWindow {
                             .left_icon("icons/copy.svg")
                             .icon_size(px(16.))
                             .disabled(exporting)
-                            .tooltip(&theme, "Copy to Clipboard")
+                            .tooltip(&theme, tr::screenshot_editor::header::copy())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.export_image(ExportDestination::Clipboard, window, cx);
@@ -2888,7 +2960,7 @@ impl ScreenshotEditorWindow {
                             .left_icon("icons/save.svg")
                             .icon_size(px(16.))
                             .disabled(exporting)
-                            .tooltip(&theme, "Save")
+                            .tooltip(&theme, tr::common::save())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.export_image(ExportDestination::File, window, cx);
@@ -2917,7 +2989,7 @@ impl ScreenshotEditorWindow {
                                         .as_ref()
                                         .is_some_and(|(kind, _)| *kind == MenuKind::More),
                                 )
-                                .tooltip(&theme, "More Actions")
+                                .tooltip(&theme, tr::screenshot_editor::header::more_actions())
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     cx.stop_propagation();
                                     this.toggle_menu(MenuKind::More, Anchor::More, window, cx);
@@ -2982,7 +3054,7 @@ impl ScreenshotEditorWindow {
                                     .size(px(16.))
                                     .text_color(theme.gray_12),
                             )
-                            .child("Layers"),
+                            .child(tr::screenshot_editor::layers::title()),
                     )
                     .child(
                         div()
@@ -3024,7 +3096,7 @@ impl ScreenshotEditorWindow {
                     .border_color(theme.gray_3)
                     .text_size(px(10.))
                     .text_color(theme.gray_9)
-                    .child("Drag to reorder • Top = front"),
+                    .child(tr::screenshot_editor::layers::reorder_hint()),
             )
     }
 
@@ -3071,7 +3143,7 @@ impl ScreenshotEditorWindow {
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.blue_11)
                         .hover(|style| style.text_color(theme.blue_9))
-                        .child("Done")
+                        .child(tr::screenshot_editor::annotation::done())
                         .on_click(cx.listener(|this, _, _window, cx| {
                             cx.stop_propagation();
                             this.selected_annotation = None;
@@ -3192,13 +3264,15 @@ impl ScreenshotEditorWindow {
             .flex_row()
             .items_center()
             .gap(px(8.))
-            .children(BgTab::ALL.map(|(tab, label)| {
+            .children(BgTab::ALL.map(|tab| {
                 let selected = tab == current;
                 div()
                     .id(gpui::SharedString::from(format!(
-                        "screenshot-bg-tab-{label}"
+                        "screenshot-bg-tab-{}",
+                        tab.id()
                     )))
                     .flex_1()
+                    .min_w_0()
                     .flex()
                     .justify_center()
                     .py(px(10.))
@@ -3217,7 +3291,7 @@ impl ScreenshotEditorWindow {
                             .text_color(theme.gray_11)
                             .hover(|style| style.border_color(theme.gray_7))
                     })
-                    .child(label)
+                    .child(div().truncate().child(tab.label()))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.choose_bg_tab(tab, window, cx);
@@ -3267,7 +3341,7 @@ impl ScreenshotEditorWindow {
             window,
             cx,
         );
-        self.ensure_background_image(cx);
+        self.ensure_background_image(window, cx);
     }
 
     fn render_wallpaper_tab(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -3415,7 +3489,7 @@ impl ScreenshotEditorWindow {
                     div()
                         .text_size(px(13.))
                         .text_color(theme.gray_12)
-                        .child("Click to select or drag and drop image"),
+                        .child(tr::screenshot_editor::background::choose_image()),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
@@ -3467,7 +3541,7 @@ impl ScreenshotEditorWindow {
                             window,
                             cx,
                         );
-                        this.ensure_background_image(cx);
+                        this.ensure_background_image(window, cx);
                     })),
             )
             .into_any_element()
@@ -3543,7 +3617,7 @@ impl ScreenshotEditorWindow {
             return div()
                 .text_size(px(12.))
                 .text_color(theme.gray_11)
-                .child("Animated Gradient is rendered as a still image for screenshots. Choose another background to replace it.")
+                .child(tr::screenshot_editor::background::animated_gradient())
                 .into_any_element();
         }
         let (from, to, angle) = match &self.project.background.source {
@@ -3635,7 +3709,7 @@ impl ScreenshotEditorWindow {
             .flex_col()
             .gap(px(24.))
             .child(
-                ui::Field::plain(&theme, "Background Image")
+                ui::Field::plain(&theme, tr::screenshot_editor::background::image_title())
                     .icon("icons/image.svg")
                     .icon_size(px(16.))
                     .child(self.render_bg_tabs(cx))
@@ -3650,10 +3724,15 @@ impl ScreenshotEditorWindow {
                     .child(tab_content),
             )
             .child(
-                ui::Field::plain(&theme, "Background Blur")
+                ui::Field::plain(&theme, tr::screenshot_editor::background::blur_title())
                     .icon("icons/bg-blur.svg")
                     .icon_size(px(16.))
-                    .child(self.slider_row("Blur", StyleSlider::Blur, "%", cx)),
+                    .child(self.slider_row(
+                        tr::screenshot_editor::style::blur(),
+                        StyleSlider::Blur,
+                        "%",
+                        cx,
+                    )),
             )
             .into_any_element()
     }
@@ -3661,7 +3740,12 @@ impl ScreenshotEditorWindow {
     fn render_padding_popover(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .p(px(16.))
-            .child(self.slider_row("Padding", StyleSlider::Padding, "px", cx))
+            .child(self.slider_row(
+                tr::screenshot_editor::style::padding(),
+                StyleSlider::Padding,
+                "px",
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -3672,7 +3756,12 @@ impl ScreenshotEditorWindow {
             .flex()
             .flex_col()
             .gap(px(16.))
-            .child(self.slider_row("Rounding", StyleSlider::Rounding, "px", cx))
+            .child(self.slider_row(
+                tr::screenshot_editor::style::rounding(),
+                StyleSlider::Rounding,
+                "px",
+                cx,
+            ))
             .child(
                 div()
                     .flex()
@@ -3682,7 +3771,7 @@ impl ScreenshotEditorWindow {
                         div()
                             .text_size(px(10.4))
                             .text_color(theme.gray_11)
-                            .child("CORNER STYLE"),
+                            .child(tr::screenshot_editor::corner::style()),
                     )
                     .child(
                         self.anchored(
@@ -3733,35 +3822,38 @@ impl ScreenshotEditorWindow {
     fn render_shadow_popover(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
         let open = self.shadow_advanced.is_open();
-        let body = div()
-            .mt(px(16.))
-            .flex()
-            .flex_col()
-            .gap(px(24.))
-            .font_weight(FontWeight::MEDIUM)
-            .child(ui::Field::plain(&theme, "Size").child(self.slider(
-                StyleSlider::ShadowSize,
-                None,
-                cx,
-            )))
-            .child(ui::Field::plain(&theme, "Opacity").child(self.slider(
-                StyleSlider::ShadowOpacity,
-                None,
-                cx,
-            )))
-            .child(ui::Field::plain(&theme, "Blur").child(self.slider(
-                StyleSlider::ShadowBlur,
-                None,
-                cx,
-            )))
-            .into_any_element();
+        let body =
+            div()
+                .mt(px(16.))
+                .flex()
+                .flex_col()
+                .gap(px(24.))
+                .font_weight(FontWeight::MEDIUM)
+                .child(
+                    ui::Field::plain(&theme, tr::screenshot_editor::style::size_label())
+                        .child(self.slider(StyleSlider::ShadowSize, None, cx)),
+                )
+                .child(
+                    ui::Field::plain(&theme, tr::screenshot_editor::style::opacity())
+                        .child(self.slider(StyleSlider::ShadowOpacity, None, cx)),
+                )
+                .child(
+                    ui::Field::plain(&theme, tr::screenshot_editor::style::blur())
+                        .child(self.slider(StyleSlider::ShadowBlur, None, cx)),
+                )
+                .into_any_element();
 
         div()
             .p(px(16.))
             .flex()
             .flex_col()
             .gap(px(16.))
-            .child(self.slider_row("Shadow", StyleSlider::Shadow, "%", cx))
+            .child(self.slider_row(
+                tr::screenshot_editor::style::shadow(),
+                StyleSlider::Shadow,
+                "%",
+                cx,
+            ))
             .child(
                 div()
                     .w_full()
@@ -3778,7 +3870,7 @@ impl ScreenshotEditorWindow {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.gray_12)
                             .hover(|style| style.text_color(theme.gray_10))
-                            .child("Advanced shadow settings")
+                            .child(tr::screenshot_editor::style::advanced_shadow())
                             .child(
                                 svg()
                                     .path("icons/chevron-down.svg")
@@ -3821,19 +3913,19 @@ impl ScreenshotEditorWindow {
             .flex_col()
             .gap(px(16.))
             .child(
-                ui::Field::plain(&theme, "Width")
+                ui::Field::plain(&theme, tr::screenshot_editor::style::width())
                     .icon("icons/enlarge.svg")
                     .icon_size(px(16.))
                     .child(self.slider(StyleSlider::BorderWidth, None, cx)),
             )
             .child(
-                ui::Field::plain(&theme, "Color")
+                ui::Field::plain(&theme, tr::screenshot_editor::style::color())
                     .icon("icons/image.svg")
                     .icon_size(px(16.))
                     .child(self.render_rgb_input(HexTarget::BorderColor, color)),
             )
             .child(
-                ui::Field::plain(&theme, "Opacity")
+                ui::Field::plain(&theme, tr::screenshot_editor::style::opacity())
                     .icon("icons/shadow.svg")
                     .icon_size(px(16.))
                     .child(self.slider(StyleSlider::BorderOpacity, None, cx)),
@@ -3856,7 +3948,7 @@ impl ScreenshotEditorWindow {
                             .text_size(px(12.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.gray_11)
-                            .child("Border"),
+                            .child(tr::screenshot_editor::style::border()),
                     )
                     .child(
                         ui::Toggle::plain(&theme, "screenshot-border-toggle", enabled).on_click(
@@ -4134,7 +4226,7 @@ impl ScreenshotEditorWindow {
                             div()
                                 .text_size(px(13.))
                                 .text_color(theme.gray_11)
-                                .child("Loading preview...")
+                                .child(tr::screenshot_editor::loading_preview())
                                 .into_any_element(),
                         ),
                     })
@@ -4177,7 +4269,7 @@ impl ScreenshotEditorWindow {
             }])
             .child(kbd_tooltip(
                 &theme,
-                "Zoom Out",
+                tr::screenshot_editor::zoom_out(),
                 &["meta", "-"],
                 ui::EditorButton::plain(&theme, "screenshot-zoom-out")
                     .left_icon("icons/zoom-out.svg")
@@ -4190,7 +4282,7 @@ impl ScreenshotEditorWindow {
             .child(self.slider(StyleSlider::Zoom, Some(px(80.)), cx))
             .child(kbd_tooltip(
                 &theme,
-                "Zoom In",
+                tr::screenshot_editor::zoom_in(),
                 &["meta", "+"],
                 ui::EditorButton::plain(&theme, "screenshot-zoom-in")
                     .left_icon("icons/zoom-in.svg")
@@ -4395,7 +4487,7 @@ impl ScreenshotEditorWindow {
                         .child(div().w(px(80.)).h(px(8.)).rounded_full().bg(theme.gray_4))
                         .child(block(36.)),
                 )
-                .child(spinning_logo(&theme)),
+                .child(spinning_logo()),
         )
     }
 }
@@ -4424,7 +4516,8 @@ impl Render for ScreenshotEditorWindow {
             .size_full()
             .flex()
             .flex_col()
-            .font_family("Geist")
+            .font_family(crate::theme::UI_FONT)
+            .locale_font()
             .font_weight(FontWeight::MEDIUM)
             .bg(if theme.is_dark() {
                 theme.gray_1
@@ -4582,23 +4675,14 @@ fn mini_checker() -> Vec<AnyElement> {
     .collect()
 }
 
-/// The skeleton's `<div class="animate-spin"><IconCapLogo /></div>`. The app
-/// has no bare logo glyph -- only the full lockup -- so the wordmark would spin
-/// with it; the lockup is drawn still instead, at the skeleton's opacity
-/// (README deviation).
-fn spinning_logo(theme: &Theme) -> impl IntoElement {
-    div().flex().items_center().justify_center().child(
-        svg()
-            .path(if theme.is_dark() {
-                "icons/logo-full-dark.svg"
-            } else {
-                "icons/logo-full.svg"
-            })
-            .w(px(103.))
-            .h(px(40.))
-            .opacity(0.5)
-            .text_color(theme.gray_8),
-    )
+/// The skeleton's `<div class="animate-spin"><IconCapLogo /></div>`: the glass
+/// mark at the skeleton's opacity, drawn still (README deviation).
+fn spinning_logo() -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(img("icons/logo-mark.svg").size(px(40.)).opacity(0.5))
 }
 
 /// The preview's checkerboard: `background-color: white` under `#f0f0f0`
@@ -4659,20 +4743,52 @@ fn slider_id(slider: StyleSlider) -> &'static str {
     }
 }
 
+fn decode_large_preview_jpeg(bytes: &[u8]) -> Option<(image::DynamicImage, u32, u32)> {
+    let mut decoder = jpeg_decoder::Decoder::new(bytes);
+    decoder.read_info().ok()?;
+    let info = decoder.info()?;
+    if info.width.max(info.height) <= 1536 {
+        return None;
+    }
+    crate::jpeg_thumbnail::decode_jpeg_thumbnail(bytes, |width, height| {
+        let scale = (768. / width.max(height) as f32).min(1.);
+        (
+            ((width as f32 * scale) as u32).max(1),
+            ((height as f32 * scale) as u32).max(1),
+        )
+    })
+}
+
 /// The Image tab's `h-48` preview, at 2x.
 fn decode_preview_image(path: &Path) -> Option<Arc<RenderImage>> {
     let bytes = std::fs::read(path).ok()?;
     let format = image::guess_format(&bytes).ok()?;
-    let decoded = image::load_from_memory_with_format(&bytes, format).ok()?;
-    let (width, height) = (decoded.width().max(1), decoded.height().max(1));
+    let scaled_jpeg = if format == image::ImageFormat::Jpeg {
+        decode_large_preview_jpeg(&bytes)
+    } else {
+        None
+    };
+    let has_scaled_jpeg = scaled_jpeg.is_some();
+    let (decoded, width, height) = scaled_jpeg.or_else(|| {
+        let decoded = image::load_from_memory_with_format(&bytes, format).ok()?;
+        let dimensions = (decoded.width().max(1), decoded.height().max(1));
+        Some((decoded, dimensions.0, dimensions.1))
+    })?;
     let scale = (768. / width.max(height) as f32).min(1.);
     let scaled = if scale < 1. {
-        decoded
-            .thumbnail(
-                ((width as f32 * scale) as u32).max(1),
-                ((height as f32 * scale) as u32).max(1),
-            )
-            .into_rgba8()
+        let target_width = ((width as f32 * scale) as u32).max(1);
+        let target_height = ((height as f32 * scale) as u32).max(1);
+        if has_scaled_jpeg {
+            decoded
+                .resize(
+                    target_width,
+                    target_height,
+                    image::imageops::FilterType::Triangle,
+                )
+                .into_rgba8()
+        } else {
+            decoded.thumbnail(target_width, target_height).into_rgba8()
+        }
     } else {
         decoded.into_rgba8()
     };
@@ -4683,34 +4799,52 @@ fn decode_preview_image(path: &Path) -> Option<Arc<RenderImage>> {
 // Loading
 // ---------------------------------------------------------------------------
 
-/// One rendered frame, in both the forms the window needs: tight RGBA (what a
-/// mask overlay resamples) and the BGRA copy gpui's atlas takes. The rows are
-/// copied once and the swap runs over a clone, so the padded GPU buffer is
-/// walked a single time.
-fn frame_buffers(frame: &RenderedFrame) -> Option<(Arc<Vec<u8>>, Arc<RenderImage>)> {
-    let row_bytes = frame.width as usize * 4;
-    let mut rgba = Vec::with_capacity(row_bytes * frame.height as usize);
-    for row in frame
-        .data
-        .chunks(frame.padded_bytes_per_row as usize)
-        .take(frame.height as usize)
-    {
-        if row.len() < row_bytes {
-            return None;
+/// Lets a config through to the still renderer only when something the
+/// renderer reads has changed. Annotations are left out of the comparison
+/// because the renderer never draws them: the editor paints them as gpui
+/// overlays and `screenshot_export::composite` burns them into exports, so an
+/// edit that only touches annotations would otherwise re-render, read back and
+/// re-upload an identical full-resolution frame.
+#[derive(Default)]
+struct RenderInputGate {
+    published: Option<Vec<u8>>,
+}
+
+impl RenderInputGate {
+    fn published(project: &mut ProjectConfiguration) -> Self {
+        Self {
+            published: render_input_key(project),
         }
-        rgba.extend_from_slice(&row[..row_bytes]);
     }
-    let mut bgra = rgba.clone();
-    for pixel in bgra.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
+
+    fn admit(&mut self, project: &mut ProjectConfiguration) -> bool {
+        let key = render_input_key(project);
+        if key.is_some() && key == self.published {
+            return false;
+        }
+        self.published = key;
+        true
     }
-    let buffer = image::RgbaImage::from_raw(frame.width, frame.height, bgra)?;
-    Some((
-        Arc::new(rgba),
-        Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
-            buffer
-        )])),
-    ))
+}
+
+fn render_input_key(project: &mut ProjectConfiguration) -> Option<Vec<u8>> {
+    let annotations = std::mem::take(&mut project.annotations);
+    let key = serde_json::to_vec(&*project);
+    project.annotations = annotations;
+    let mut key = key.ok()?;
+    key.extend(
+        project
+            .hidden_text_segments
+            .iter()
+            .flat_map(|index| index.to_le_bytes()),
+    );
+    Some(key)
+}
+
+/// Only the newest queued frame is ever shown, so older ones are dropped
+/// before the copy rather than converted and replaced.
+fn latest_frame<T>(frame: T, frames: &flume::Receiver<T>) -> T {
+    frames.drain().last().unwrap_or(frame)
 }
 
 /// Read the bundle, start the still renderer on tokio, pump frames back --
@@ -4781,13 +4915,14 @@ pub fn load_screenshot_project(
             return;
         }
 
-        while let Ok((frame, revision)) = frame_rx.recv_async().await {
+        while let Ok(frame) = frame_rx.recv_async().await {
+            let (frame, revision) = latest_frame(frame, &frame_rx);
             let size = (frame.width, frame.height);
-            let buffers = cx
+            let image = cx
                 .background_executor()
-                .spawn(async move { frame_buffers(&frame) })
+                .spawn(async move { crate::editor_window::frame_image(&frame) })
                 .await;
-            let Some((rgba, image)) = buffers else {
+            let Some(image) = image else {
                 tracing::warn!("a rendered screenshot frame could not be converted for display");
                 continue;
             };
@@ -4799,7 +4934,7 @@ pub fn load_screenshot_project(
             );
             if handle
                 .update(cx, |view, window, cx| {
-                    view.frame_arrived(image, rgba, size, window, cx)
+                    view.frame_arrived(image, size, window, cx)
                 })
                 .is_err()
             {
@@ -4824,11 +4959,166 @@ fn aspect_eq(a: &Option<cap_project::AspectRatio>, b: &Option<cap_project::Aspec
 mod tests {
     use super::*;
 
+    #[test]
+    fn background_preview_jpeg_scaling_starts_above_the_size_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        for (width, height, expected) in [
+            (768, 384, (768, 384)),
+            (1536, 768, (768, 384)),
+            (1537, 769, (767, 384)),
+            (769, 1537, (384, 767)),
+        ] {
+            let path = root.path().join("preview.bin");
+            image::RgbImage::from_pixel(width, height, image::Rgb([40, 120, 200]))
+                .save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let scaled = decode_large_preview_jpeg(&bytes);
+            if width.max(height) <= 1536 {
+                assert!(scaled.is_none());
+            } else {
+                let (decoded, source_width, source_height) = scaled.unwrap();
+                assert_eq!((source_width, source_height), (width, height));
+                assert!(decoded.width() < width && decoded.height() < height);
+            }
+            let preview = decode_preview_image(&path).unwrap();
+            let size = preview.size(0);
+            assert_eq!(
+                size,
+                gpui::size(
+                    gpui::DevicePixels::from(expected.0),
+                    gpui::DevicePixels::from(expected.1)
+                )
+            );
+
+            for pixel in preview.as_bytes(0).unwrap().chunks_exact(4) {
+                assert!(pixel[0].abs_diff(200) <= 4);
+                assert!(pixel[1].abs_diff(120) <= 4);
+                assert!(pixel[2].abs_diff(40) <= 4);
+                assert_eq!(pixel[3], 255);
+            }
+        }
+    }
+
+    #[test]
+    fn background_preview_large_grayscale_jpeg_remains_opaque() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("preview.jpg");
+        image::GrayImage::from_pixel(2048, 1024, image::Luma([90]))
+            .save(&path)
+            .unwrap();
+        let preview = decode_preview_image(&path).unwrap();
+        for pixel in preview.as_bytes(0).unwrap().chunks_exact(4) {
+            assert!(pixel[..3].iter().all(|channel| channel.abs_diff(90) <= 1));
+            assert_eq!(pixel[3], 255);
+        }
+    }
+
+    #[test]
+    fn background_preview_fallback_matches_the_existing_decode_and_resize() {
+        let root = tempfile::tempdir().unwrap();
+        for (format, width) in [
+            (image::ImageFormat::Png, 1601),
+            (image::ImageFormat::Jpeg, 767),
+            (image::ImageFormat::Jpeg, 1536),
+        ] {
+            let path = root.path().join("preview.bin");
+            let original =
+                image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(width, 7, |x, y| {
+                    image::Rgba([(x % 256) as u8, (y * 20) as u8, 90, (x % 255) as u8])
+                }));
+            if format == image::ImageFormat::Jpeg {
+                original.to_rgb8().save_with_format(&path, format).unwrap();
+            } else {
+                original.save_with_format(&path, format).unwrap();
+            }
+            let decoded =
+                image::load_from_memory_with_format(&std::fs::read(&path).unwrap(), format)
+                    .unwrap();
+            let scale = (768. / width as f32).min(1.);
+            let mut expected = decoded
+                .thumbnail((width as f32 * scale) as u32, (7. * scale) as u32)
+                .into_rgba8();
+            let size = expected.dimensions();
+            cap_gpui_kernels::frame::swap_red_blue(&mut expected);
+            let preview = decode_preview_image(&path).unwrap();
+            assert_eq!(preview.as_bytes(0).unwrap(), expected.as_raw());
+            assert_eq!(
+                preview.size(0),
+                gpui::size(
+                    gpui::DevicePixels::from(size.0),
+                    gpui::DevicePixels::from(size.1)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn background_preview_rejects_missing_and_malformed_images() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("preview.jpg");
+        assert!(decode_preview_image(&path).is_none());
+        for bytes in [b"not an image".as_slice(), &[0xff, 0xd8, 0xff, 0xd9]] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(decode_preview_image(&path).is_none());
+        }
+    }
+
     /// The checkerboard is one 240x240 tile of 10px cells -- an even number of
     /// cells per axis, so tiling it leaves no seam.
     #[test]
     fn the_checkerboard_tile_repeats_without_a_seam() {
         assert_eq!(CHECKER_TILE % (CHECKER_CELL * 2), 0);
+    }
+
+    #[test]
+    fn the_displayed_frame_matches_unpadding_then_swapping_a_copy() {
+        for (width, height) in [(1u32, 1u32), (3, 5), (7, 2), (33, 9), (1001, 3)] {
+            let row_bytes = width * 4;
+            for stride in [row_bytes, row_bytes + 4, row_bytes.next_multiple_of(256)] {
+                let frame = RenderedFrame {
+                    data: Arc::new(
+                        (0..stride as usize * height as usize)
+                            .map(|index| (index * 7 + index / 251) as u8)
+                            .collect(),
+                    ),
+                    width,
+                    height,
+                    padded_bytes_per_row: stride,
+                    frame_number: 0,
+                    target_time_ns: 0,
+                };
+                let rgba = cap_gpui_kernels::frame::unpad_rows(
+                    &frame.data,
+                    row_bytes as usize,
+                    stride as usize,
+                    height as usize,
+                )
+                .unwrap();
+                let mut bgra = rgba.clone();
+                cap_gpui_kernels::frame::swap_red_blue(&mut bgra);
+
+                let image = crate::editor_window::frame_image(&frame).unwrap();
+                assert_eq!(
+                    image.size(0),
+                    gpui::size(
+                        gpui::DevicePixels::from(width),
+                        gpui::DevicePixels::from(height)
+                    )
+                );
+                assert_eq!(image.as_bytes(0).unwrap(), bgra.as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_newest_queued_frame_is_converted() {
+        let (frame_tx, frame_rx) = flume::bounded(2);
+        assert_eq!(latest_frame(1, &frame_rx), 1);
+        frame_tx.send(2).unwrap();
+        frame_tx.send(3).unwrap();
+        assert_eq!(latest_frame(1, &frame_rx), 3);
+        assert!(frame_rx.is_empty());
     }
 
     /// `PaddingPopover`'s guard (`context.tsx:30-42`).
@@ -4937,5 +5227,291 @@ mod tests {
         // The 8px floor keeps a gentle tick moving (`Preview.tsx:306`).
         assert_eq!(ctrl_wheel_zoom_step(1.), 8. * 0.005);
         assert_eq!(ctrl_wheel_zoom_step(-1.), -8. * 0.005);
+    }
+
+    fn new_screenshot_config() -> ProjectConfiguration {
+        let mut config = ProjectConfiguration::default();
+        config.background.source = BackgroundSource::Color {
+            value: [255, 255, 255],
+            alpha: 0,
+        };
+        config.background.shadow = 0.0;
+        config
+    }
+
+    fn arrow(id: &str, stroke_width: f64) -> cap_project::Annotation {
+        cap_project::Annotation {
+            id: id.into(),
+            annotation_type: cap_project::AnnotationType::Arrow,
+            x: 120.,
+            y: 80.,
+            width: 300.,
+            height: 160.,
+            stroke_color: "#F05656".into(),
+            stroke_width,
+            fill_color: "transparent".into(),
+            opacity: 1.,
+            rotation: 0.,
+            text: None,
+            mask_type: None,
+            mask_level: None,
+            points: None,
+        }
+    }
+
+    #[test]
+    fn annotation_only_edits_never_reach_the_still_renderer() {
+        let mut project = new_screenshot_config();
+        let mut gate = RenderInputGate::published(&mut project);
+
+        project.annotations.push(arrow("a", 4.));
+        assert!(!gate.admit(&mut project));
+        for width in 5..60 {
+            project.annotations[0].stroke_width = width as f64;
+            assert!(!gate.admit(&mut project));
+        }
+        project.annotations[0].stroke_color = "#2E7DF6".into();
+        project.annotations.push(arrow("b", 8.));
+        assert!(!gate.admit(&mut project));
+        project.annotations.clear();
+        assert!(!gate.admit(&mut project));
+        assert_eq!(project.annotations.len(), 0);
+    }
+
+    #[test]
+    fn renderer_inputs_still_reach_the_still_renderer() {
+        let mut project = new_screenshot_config();
+        project.annotations.push(arrow("a", 4.));
+        let mut gate = RenderInputGate::published(&mut project);
+
+        project.background.padding = 12.;
+        assert!(gate.admit(&mut project));
+        assert!(!gate.admit(&mut project));
+
+        project.background.rounding = 8.;
+        project.annotations[0].stroke_width = 9.;
+        assert!(gate.admit(&mut project));
+        assert_eq!(project.annotations[0].stroke_width, 9.);
+
+        project.background.source = BackgroundSource::Color {
+            value: [10, 20, 30],
+            alpha: 255,
+        };
+        assert!(gate.admit(&mut project));
+
+        project.hidden_text_segments.push(0);
+        assert!(gate.admit(&mut project));
+    }
+
+    #[test]
+    fn an_unloaded_editor_publishes_its_first_config() {
+        let mut project = new_screenshot_config();
+        assert!(RenderInputGate::default().admit(&mut project));
+    }
+
+    #[cfg(unix)]
+    fn cpu_secs() -> f64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        let usage = unsafe { usage.assume_init() };
+        let secs = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1_000_000.0;
+        secs(usage.ru_utime) + secs(usage.ru_stime)
+    }
+
+    #[cfg(windows)]
+    fn cpu_secs() -> f64 {
+        use windows_sys::Win32::{
+            Foundation::FILETIME,
+            System::Threading::{GetCurrentProcess, GetProcessTimes},
+        };
+
+        let empty = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut creation, mut exit, mut kernel, mut user) = (empty, empty, empty, empty);
+        unsafe {
+            GetProcessTimes(
+                GetCurrentProcess(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            )
+        };
+        let secs = |time: FILETIME| {
+            ((u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)) as f64
+                / 10_000_000.0
+        };
+        secs(kernel) + secs(user)
+    }
+
+    fn synthetic_source(width: u32, height: u32) -> LoadedSource {
+        let mut rgba = vec![0u8; width as usize * height as usize * 4];
+        for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+            let x = (index % width as usize) as u32;
+            let y = (index / width as usize) as u32;
+            pixel.copy_from_slice(&[
+                (x * 255 / width) as u8,
+                (y * 255 / height) as u8,
+                ((x ^ y) & 0xff) as u8,
+                255,
+            ]);
+        }
+        let studio_meta = StudioRecordingMeta::SingleSegment {
+            segment: cap_project::SingleSegment {
+                display: cap_project::VideoMeta {
+                    path: "original.png".into(),
+                    fps: 0,
+                    start_time: Some(0.0),
+                    device_id: None,
+                },
+                camera: None,
+                audio: None,
+                cursor: None,
+            },
+        };
+        let meta = RecordingMeta {
+            platform: Some(cap_project::Platform::default()),
+            project_path: std::env::temp_dir().join("screenshot-annotation-bench.cap"),
+            pretty_name: "bench".into(),
+            sharing: None,
+            inner: RecordingMetaInner::Studio(Box::new(studio_meta.clone())),
+            upload: None,
+        };
+        let mut config = new_screenshot_config();
+        config.annotations.push(arrow("a", 4.));
+        LoadedSource {
+            rgba,
+            width,
+            height,
+            pretty_name: "bench".into(),
+            config,
+            meta,
+            studio_meta,
+        }
+    }
+
+    struct DragResult {
+        renders: usize,
+        cpu_ms: f64,
+        render_ms: Vec<f64>,
+    }
+
+    /// Drives the real `run_still_renderer` and frame pump with a 60 Hz
+    /// stroke-width slider drag, publishing every tick the way `publish` did
+    /// before the gate (`gated == false`) or through `RenderInputGate`.
+    async fn drag_stroke_width(width: u32, height: u32, ticks: usize, gated: bool) -> DragResult {
+        let source = synthetic_source(width, height);
+        let mut project = source.config.clone();
+        let (config_tx, config_rx) = tokio::sync::watch::channel(ConfigUpdate {
+            revision: 0,
+            config: project.clone(),
+        });
+        let (_export_tx, export_rx) = tokio::sync::mpsc::channel(1);
+        let (frame_tx, frame_rx) = flume::bounded(2);
+        let (setup_tx, setup_rx) = flume::bounded(1);
+        tokio::spawn(run_still_renderer(
+            source, config_rx, export_rx, frame_tx, setup_tx,
+        ));
+        setup_rx.recv_async().await.unwrap().unwrap();
+        let (first, _) = frame_rx.recv_async().await.unwrap();
+        assert!(crate::editor_window::frame_image(&first).is_some());
+
+        let renders = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let render_ms = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sent_at = Arc::new(std::sync::Mutex::new(
+            HashMap::<u64, std::time::Instant>::new(),
+        ));
+        let pump = {
+            let (renders, render_ms, sent_at) =
+                (renders.clone(), render_ms.clone(), sent_at.clone());
+            tokio::spawn(async move {
+                while let Ok((frame, revision)) = frame_rx.recv_async().await {
+                    let image = tokio::task::spawn_blocking(move || {
+                        crate::editor_window::frame_image(&frame)
+                    })
+                    .await
+                    .unwrap();
+                    assert!(image.is_some());
+                    if let Some(sent) = sent_at.lock().unwrap().remove(&revision) {
+                        render_ms
+                            .lock()
+                            .unwrap()
+                            .push(sent.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    renders.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+        };
+
+        let mut gate = RenderInputGate::published(&mut project);
+        let mut revision = 0;
+        let cpu_start = cpu_secs();
+        let mut interval = tokio::time::interval(Duration::from_micros(16_667));
+        for tick in 0..ticks {
+            interval.tick().await;
+            project.annotations[0].stroke_width = 4. + (tick % 40) as f64;
+            if gated && !gate.admit(&mut project) {
+                continue;
+            }
+            revision += 1;
+            sent_at
+                .lock()
+                .unwrap()
+                .insert(revision, std::time::Instant::now());
+            config_tx
+                .send(ConfigUpdate {
+                    revision,
+                    config: project.clone(),
+                })
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        let cpu_ms = (cpu_secs() - cpu_start) * 1000.0;
+        drop(config_tx);
+        pump.await.unwrap();
+
+        let render_ms = render_ms.lock().unwrap().clone();
+        DragResult {
+            renders: renders.load(std::sync::atomic::Ordering::Relaxed),
+            cpu_ms,
+            render_ms,
+        }
+    }
+
+    fn median(values: &mut [f64]) -> f64 {
+        if values.is_empty() {
+            return 0.;
+        }
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2]
+    }
+
+    /// `cargo test --bin cap-gpui benchmark_annotation_slider_drag -- --ignored --nocapture`
+    #[test]
+    #[ignore = "GPU benchmark"]
+    fn benchmark_annotation_slider_drag() {
+        const TICKS: usize = 120;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        println!("| still | mode | renders | process CPU | CPU / tick | median edit-to-frame |");
+        println!("| --- | --- | ---: | ---: | ---: | ---: |");
+        for (width, height) in [(1920, 1080), (3024, 1964), (3840, 2160)] {
+            for gated in [false, true] {
+                let mut result = runtime.block_on(drag_stroke_width(width, height, TICKS, gated));
+                println!(
+                    "| {width}x{height} | {} | {} | {:.0} ms | {:.2} ms | {:.1} ms |",
+                    if gated { "gated" } else { "main" },
+                    result.renders,
+                    result.cpu_ms,
+                    result.cpu_ms / TICKS as f64,
+                    median(&mut result.render_ms),
+                );
+            }
+        }
     }
 }

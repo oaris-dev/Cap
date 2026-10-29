@@ -5216,13 +5216,13 @@ async fn upload_exported_video(
     channel.send(UploadProgress { progress: 0.0 }).ok();
 
     let existing_video_id = upload::reusable_video_id(meta.sharing.as_ref(), meta.upload.as_ref());
-    let s3_config = match async {
+    let (s3_config, created_link) = match async {
         let video_id = match mode {
             UploadMode::Initial { pre_created_video } => {
                 if let Some(video_id) = existing_video_id.clone() {
                     Some(video_id)
                 } else if let Some(pre_created) = pre_created_video {
-                    return Ok(pre_created.config);
+                    return Ok((pre_created.config, Some(pre_created.link)));
                 } else {
                     None
                 }
@@ -5236,7 +5236,7 @@ async fn upload_exported_video(
             }
         };
 
-        create_or_get_video(
+        let created = create_or_get_video(
             &app,
             false,
             video_id,
@@ -5244,7 +5244,8 @@ async fn upload_exported_video(
             Some(metadata.clone()),
             organization_id,
         )
-        .await
+        .await?;
+        Ok((created.config, created.share_url))
     }
     .await
     {
@@ -5288,6 +5289,7 @@ async fn upload_exported_video(
                 .sharing
                 .as_ref()
                 .map(|sharing| sharing.link.clone())
+                .or(created_link)
                 .unwrap_or(uploaded_video.link);
 
             meta.upload = Some(UploadMeta::Complete);
@@ -6228,7 +6230,10 @@ async fn get_mic_waveforms(editor_instance: WindowEditorInstance) -> Result<Vec<
         // Waits for the background decode; a failed track just renders as an
         // empty waveform (playback/export surface the actual error).
         match segment.audio.get().await {
-            Ok(Some(audio)) => out.push(audio::get_waveform(&audio)),
+            Ok(Some(audio)) => out.push(audio::align_waveform_to_playback(
+                audio::get_waveform(&audio),
+                segment.audio_timing_repair.mic_offset_secs,
+            )),
             Ok(None) => out.push(Vec::new()),
             Err(error) => {
                 warn!(%error, "Mic audio failed to load; returning empty waveform");
@@ -6250,7 +6255,10 @@ async fn get_system_audio_waveforms(
 
     for segment in editor_instance.segment_medias.iter() {
         match segment.system_audio.get().await {
-            Ok(Some(audio)) => out.push(audio::get_waveform(&audio)),
+            Ok(Some(audio)) => out.push(audio::align_waveform_to_playback(
+                audio::get_waveform(&audio),
+                segment.audio_timing_repair.system_audio_offset_secs,
+            )),
             Ok(None) => out.push(Vec::new()),
             Err(error) => {
                 warn!(%error, "System audio failed to load; returning empty waveform");
