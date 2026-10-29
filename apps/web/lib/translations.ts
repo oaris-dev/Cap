@@ -170,23 +170,43 @@ const en = {
 	"share.backTo": "Back to {label}",
 	"share.dashboardOpenFailed":
 		"Couldn't open your dashboard. Please try again.",
-	"share.signedInAs":
-		"You're signed in as {email}. Use the account that was invited to view this recording.",
 	"share.switchAccount": "Switch account",
-	"share.signIn": "sign in",
-	"share.createAccount": "create an account",
-	"share.privateAccessBefore": "If you have access, ",
-	"share.privateAccessBetween": " or ",
-	"share.privateAccessAfter": " using the email address that was invited.",
 	"share.removeWatermark": "Remove watermark",
+	"access.signedInNoAccessBefore": "You're signed in as ",
+	"access.signedInNoAccessAfter":
+		", which doesn't have access. Switch to the account that was invited, or ask the owner to share it with you.",
+	"access.goToMyVideos": "Go to my videos",
+	"access.privateLede":
+		"Only people the owner invited can watch it. If that's you, sign in with the email address that was invited.",
+	"access.signIn": "Sign in",
+	"access.createAccount": "Create an account",
+	"access.signInRequiredTitle": "Sign in to watch",
+	"access.signInRequiredLede":
+		"The owner only shares this video with approved email addresses. Sign in with yours to start watching.",
+	"access.restrictedTitle": "This video is restricted",
+	"access.restrictedLedeAfterEmail":
+		" isn't on the list of addresses the owner allows. Try another account, or ask the owner for access.",
+	"access.restrictedLede":
+		"Your email address isn't on the list of addresses the owner allows. Try another account, or ask the owner for access.",
+	"access.passwordTitle": "This video is password protected",
+	"access.passwordLede":
+		"Enter the password the owner gave you to start watching.",
+	"access.passwordChecking": "Checking…",
+	"access.passwordSubmit": "Watch video",
+	"access.passwordWrong": "That password didn't work. Check it and try again.",
+	"access.notFoundTitle": "We couldn't find this video",
+	"access.notFoundLede":
+		"It may have been deleted, or the link is missing a few characters. Check the link with whoever sent it to you.",
+	"access.notFoundFootnote": "Think this is a mistake?",
+	"access.contactUs": "Contact us",
+	"access.goHome": "Go to homepage",
+	"access.preparingTitle": "Preparing your recording",
+	"access.preparingLede":
+		"Your recording is almost ready to watch. This page will update on its own.",
+	"access.stillPreparingTitle": "Still preparing your recording",
+	"access.stillPreparingLede":
+		"This is taking longer than usual. Reload the page in a moment and it should be ready.",
 	"share.videoPrivate": "This video is private",
-	"share.signInToManage": "sign in",
-	"share.requiresSignIn": "This video requires sign-in",
-	"share.emailRestrictionDescription":
-		"The owner of this video has restricted access. Please {link} with an authorized email address to view.",
-	"share.accessRestricted": "Access restricted",
-	"share.emailDeniedDescription":
-		"Your email address does not meet the requirements set by the video owner.",
 
 	"meta.titleSuffix": "oaris",
 	"meta.watchDescription": "Watch this video on oaris",
@@ -369,23 +389,44 @@ const de: Record<keyof typeof en, string> = {
 	"share.backTo": "Zurück zu {label}",
 	"share.dashboardOpenFailed":
 		"Dashboard konnte nicht geöffnet werden. Bitte erneut versuchen.",
-	"share.signedInAs":
-		"Sie sind als {email} angemeldet. Verwenden Sie das Konto, das zu dieser Aufnahme eingeladen wurde.",
 	"share.switchAccount": "Konto wechseln",
-	"share.signIn": "anmelden",
-	"share.createAccount": "ein Konto erstellen",
-	"share.privateAccessBefore": "Wenn Sie Zugriff haben, ",
-	"share.privateAccessBetween": " oder ",
-	"share.privateAccessAfter": " Sie sich mit der eingeladenen E-Mail-Adresse.",
 	"share.removeWatermark": "Wasserzeichen entfernen",
+	"access.signedInNoAccessBefore": "Sie sind angemeldet als ",
+	"access.signedInNoAccessAfter":
+		", und dieses Konto hat keinen Zugriff. Wechseln Sie zum eingeladenen Konto oder bitten Sie den Eigentümer, das Video mit Ihnen zu teilen.",
+	"access.goToMyVideos": "Zu meinen Videos",
+	"access.privateLede":
+		"Nur eingeladene Personen können dieses Video ansehen. Wenn Sie dazugehören, melden Sie sich mit der eingeladenen E-Mail-Adresse an.",
+	"access.signIn": "Anmelden",
+	"access.createAccount": "Konto erstellen",
+	"access.signInRequiredTitle": "Zum Ansehen anmelden",
+	"access.signInRequiredLede":
+		"Der Eigentümer teilt dieses Video nur mit freigegebenen E-Mail-Adressen. Melden Sie sich mit Ihrer an, um es anzusehen.",
+	"access.restrictedTitle": "Dieses Video ist eingeschränkt",
+	"access.restrictedLedeAfterEmail":
+		" steht nicht auf der Liste der Adressen, die der Eigentümer zulässt. Versuchen Sie ein anderes Konto oder bitten Sie den Eigentümer um Zugriff.",
+	"access.restrictedLede":
+		"Ihre E-Mail-Adresse steht nicht auf der Liste der Adressen, die der Eigentümer zulässt. Versuchen Sie ein anderes Konto oder bitten Sie den Eigentümer um Zugriff.",
+	"access.passwordTitle": "Dieses Video ist passwortgeschützt",
+	"access.passwordLede":
+		"Geben Sie das Passwort ein, das Sie vom Eigentümer erhalten haben.",
+	"access.passwordChecking": "Wird geprüft…",
+	"access.passwordSubmit": "Video ansehen",
+	"access.passwordWrong":
+		"Das Passwort ist nicht korrekt. Bitte prüfen Sie es und versuchen Sie es erneut.",
+	"access.notFoundTitle": "Dieses Video wurde nicht gefunden",
+	"access.notFoundLede":
+		"Es wurde möglicherweise gelöscht, oder im Link fehlen einige Zeichen. Prüfen Sie den Link mit der Person, die ihn Ihnen geschickt hat.",
+	"access.notFoundFootnote": "Glauben Sie, dass das ein Fehler ist?",
+	"access.contactUs": "Kontaktieren Sie uns",
+	"access.goHome": "Zur Startseite",
+	"access.preparingTitle": "Ihre Aufnahme wird vorbereitet",
+	"access.preparingLede":
+		"Ihre Aufnahme ist fast bereit. Diese Seite aktualisiert sich von selbst.",
+	"access.stillPreparingTitle": "Ihre Aufnahme wird noch vorbereitet",
+	"access.stillPreparingLede":
+		"Das dauert länger als üblich. Laden Sie die Seite gleich neu, dann sollte sie bereit sein.",
 	"share.videoPrivate": "Dieses Video ist privat",
-	"share.signInToManage": "anmelden",
-	"share.requiresSignIn": "Für dieses Video ist eine Anmeldung erforderlich",
-	"share.emailRestrictionDescription":
-		"Der Eigentümer dieses Videos hat den Zugang eingeschränkt. Bitte {link} Sie sich mit einer autorisierten E-Mail-Adresse an.",
-	"share.accessRestricted": "Zugang eingeschränkt",
-	"share.emailDeniedDescription":
-		"Ihre E-Mail-Adresse erfüllt nicht die Anforderungen des Video-Eigentümers.",
 
 	"meta.titleSuffix": "oaris",
 	"meta.watchDescription": "Dieses Video auf oaris ansehen",

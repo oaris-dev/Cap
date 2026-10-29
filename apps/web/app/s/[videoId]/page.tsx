@@ -37,17 +37,20 @@ import { and, eq, type InferSelectModel, isNull, sql } from "drizzle-orm";
 import { Effect, Option } from "effect";
 import type { Metadata } from "next";
 import { headers } from "next/headers";
-import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getVideoAnalytics } from "@/actions/videos/get-analytics";
+import { after } from "next/server";
 import {
 	getDashboardSpacesData,
 	type OrganizationSettings,
 	type Spaces,
 } from "@/app/(org)/dashboard/dashboard-data";
-import { OarisLogo } from "@/components/OarisLogo";
 import { isAiConfigured } from "@/lib/ai/provider";
 import { completeDesktopSegmentsManifestAndQueue } from "@/lib/desktop-segments-recovery";
+import { isEarlyInstantPlaybackEnabled } from "@/lib/early-instant-playback";
+import {
+	getPendingLoomProcessing,
+	startDeferredLoomProcessing,
+} from "@/lib/loom-deferred-processing";
 import { createNotification } from "@/lib/Notification";
 import {
 	canManageOrganizationSettings,
@@ -60,7 +63,10 @@ import { runPromise } from "@/lib/server";
 import { getSharePageBranding } from "@/lib/share-branding";
 import { parseShareCallToAction } from "@/lib/share-call-to-action";
 import { getShareDashboardDestination } from "@/lib/share-dashboard-destination";
-import { getSharePlaybackUrl } from "@/lib/share-playback";
+import {
+	canStartPlaybackInHtml,
+	getSharePlaybackSource,
+} from "@/lib/share-playback";
 import { buildShareVideoMetadata } from "@/lib/share-video-metadata";
 import { resolveShareWebUrl } from "@/lib/share-web-url";
 import { isVideoOverShareableLinkLimit } from "@/lib/shareable-link-quota";
@@ -78,11 +84,16 @@ import {
 	areEditSpecsEquivalent,
 	createIdentityEditSpec,
 } from "@/lib/video-edits";
+import { getVideoViewCount } from "@/lib/video-view-count";
 import { optionFromTOrFirst } from "@/utils/effect";
 import { isAiGenerationEnabled } from "@/utils/flags";
-import { PasswordOverlay } from "./_components/PasswordOverlay";
+import {
+	AccessRestrictedState,
+	PrivateVideoState,
+	SignInRequiredState,
+} from "./_components/AccessStates";
+import { PasswordGate } from "./_components/PasswordGate";
 import { PendingRecordingShare } from "./_components/PendingRecordingShare";
-import { PrivateAccessActions } from "./_components/PrivateAccessActions";
 import { ShareHeader } from "./_components/ShareHeader";
 import { Share } from "./Share";
 
@@ -121,6 +132,25 @@ function toShareVideo<
 }
 
 // Helper function to fetch shared spaces data for a video
+// The longest the page waits for the playback URL beyond its other queries.
+const SERVER_PLAYBACK_WAIT_MS = 50;
+
+function resolveWithin<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+	return new Promise((resolve) => {
+		const timer = setTimeout(() => resolve(null), ms);
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			() => {
+				clearTimeout(timer);
+				resolve(null);
+			},
+		);
+	});
+}
+
 async function getSharedSpacesForVideo(videoId: Video.VideoId) {
 	// Space-level and organization-level sharing are independent queries.
 	const [spaceSharing, orgSharing] = await Promise.all([
@@ -191,25 +221,6 @@ async function getSharedSpacesForVideo(videoId: Video.VideoId) {
 	};
 }
 
-function TranslatedLink({
-	translationKey,
-	linkText,
-	href,
-}: {
-	translationKey: "share.emailRestrictionDescription";
-	linkText: string;
-	href: string;
-}) {
-	const parts = t(translationKey).split("{link}");
-	return (
-		<>
-			{parts[0]}
-			<Link href={href}>{linkText}</Link>
-			{parts[1] || ""}
-		</>
-	);
-}
-
 function PolicyDeniedView({
 	reason,
 	videoId,
@@ -217,32 +228,13 @@ function PolicyDeniedView({
 	reason?: string;
 	videoId: Video.VideoId;
 }) {
-	let title = t("share.videoPrivate");
-	let description: React.ReactNode = <PrivateAccessActions videoId={videoId} />;
-
 	if (reason === "email_restriction_login_required") {
-		title = t("share.requiresSignIn");
-		description = (
-			<TranslatedLink
-				translationKey="share.emailRestrictionDescription"
-				linkText={t("share.signInToManage")}
-				href={`/login?next=${encodeURIComponent(`/s/${videoId}`)}`}
-			/>
-		);
-	} else if (reason === "email_restriction_denied") {
-		title = t("share.accessRestricted");
-		description = t("share.emailDeniedDescription");
+		return <SignInRequiredState videoId={videoId} />;
 	}
-
-	return (
-		<div className="flex flex-col justify-center items-center p-4 min-h-screen text-center bg-[oklch(0.992_0.005_78.25)] font-lexend">
-			<OarisLogo className="w-32 h-auto text-gray-12" />
-			<h1 className="mb-2 text-2xl font-semibold font-league-spartan">
-				{title}
-			</h1>
-			<div className="text-gray-400">{description}</div>
-		</div>
-	);
+	if (reason === "email_restriction_denied") {
+		return <AccessRestrictedState videoId={videoId} />;
+	}
+	return <PrivateVideoState videoId={videoId} />;
 }
 
 const renderPolicyDenied = (videoId: Video.VideoId, reason?: string) =>
@@ -315,6 +307,8 @@ export async function generateMetadata(
 							videoId,
 							name: video.name,
 							sourceType: video.source.type,
+							width: Option.getOrNull(video.width),
+							height: Option.getOrNull(video.height),
 							webUrl,
 							canonicalWebUrl: buildEnv.NEXT_PUBLIC_WEB_URL,
 							advertiseIframelyPlayer: shouldAdvertiseIframelyPlayer,
@@ -442,27 +436,28 @@ export default async function ShareVideoPage(props: PageProps<"/s/[videoId]">) {
 		Effect.catchTag("VerifyVideoPasswordError", () =>
 			Effect.succeed({ needsPassword: true } as const),
 		),
-		Effect.map((data) => (
-			// overflow-x-clip: the timeline view's theater strip breaks out to
-			// 100vw, which overshoots by the scrollbar width on OSes with classic
-			// scrollbars; clipping here keeps the page from gaining a horizontal
-			// scroll without creating a new scroll container.
-			//
-			// Fork: upstream pins this to the viewport on desktop so the comments
-			// rail can run full height, which leaves the page with two detached
-			// scroll areas and no document bottom to put a footer at. One
-			// scrolling document instead; the rail stays beside the video by
-			// being sticky rather than by the page being frozen.
-			<div
-				key={videoId}
-				className="flex overflow-x-clip flex-col min-h-screen bg-[oklch(0.992_0.005_78.25)] font-lexend"
-			>
-				<PasswordOverlay isOpen={data.needsPassword} videoId={videoId} />
-				{!data.needsPassword && (
+		Effect.map((data) =>
+			data.needsPassword ? (
+				<PasswordGate key={videoId} videoId={videoId} />
+			) : (
+				// overflow-x-clip: the timeline view's theater strip breaks out to
+				// 100vw, which overshoots by the scrollbar width on OSes with classic
+				// scrollbars; clipping here keeps the page from gaining a horizontal
+				// scroll without creating a new scroll container.
+				//
+				// Fork: upstream pins this to the viewport on desktop so the comments
+				// rail can run full height, which leaves the page with two detached
+				// scroll areas and no document bottom to put a footer at. One
+				// scrolling document instead; the rail stays beside the video by
+				// being sticky rather than by the page being frozen.
+				<div
+					key={videoId}
+					className="flex overflow-x-clip flex-col min-h-screen bg-[oklch(0.992_0.005_78.25)] font-lexend"
+				>
 					<AuthorizedContent video={data.video} searchParams={searchParams} />
-				)}
-			</div>
-		)),
+				</div>
+			),
+		),
 		Effect.catchTags(getShareVideoPageCatchers(videoId, awaitRecording)),
 		provideOptionalAuth,
 		EffectRuntime.runPromise,
@@ -545,6 +540,10 @@ async function AuthorizedContent({
 		Option.map(Comment.CommentId.make),
 	);
 	const recordingStopped = hasRecordingStoppedParam(searchParams);
+	const earlySegmentPlayback =
+		recordingStopped &&
+		video.source?.type === "desktopSegments" &&
+		isEarlyInstantPlaybackEnabled(video.owner.id);
 
 	// Everything below is an independent round trip (DB or storage); each is
 	// started here and awaited together further down, so the page pays for the
@@ -588,14 +587,31 @@ async function AuthorizedContent({
 				);
 				return false;
 			});
-	const initialPlaybackUrlPromise =
+	const initialPlaybackSourcePromise =
 		!video.isScreenshot &&
 		!hasActiveUpload &&
 		(video.source.type === "desktopMP4" || video.source.type === "webMP4")
 			? overShareLimitPromise.then((overLimit) =>
-					overLimit ? null : getSharePlaybackUrl(video),
+					overLimit ? null : getSharePlaybackSource(video),
 				)
 			: undefined;
+	const initialPlaybackUrlPromise = initialPlaybackSourcePromise?.then(
+		(source) => source?.url ?? null,
+	);
+	// On Cap's own CDN the signed URL is ready as soon as the share-limit check
+	// is (signing is local), so it is awaited with the rest of the page and
+	// rendered into the HTML: the browser starts the video download before the
+	// player hydrates. Custom buckets and storage integrations keep resolving it
+	// on the client, behind the probe that falls back to the playlist route, and
+	// so does this source if it is not ready in time.
+	const serverPlaybackSourcePromise =
+		buildEnv.NEXT_PUBLIC_IS_CAP === "true" &&
+		!video.bucket &&
+		!video.storageIntegrationId &&
+		initialPlaybackSourcePromise &&
+		canStartPlaybackInHtml((await headers()).get("user-agent"))
+			? resolveWithin(initialPlaybackSourcePromise, SERVER_PLAYBACK_WAIT_MS)
+			: Promise.resolve(null);
 
 	const aiGenerationEnabledPromise = isAiGenerationEnabled(video.owner);
 	const imagesPromise = Effect.gen(function* () {
@@ -761,7 +777,7 @@ async function AuthorizedContent({
 			);
 	}).pipe(EffectRuntime.runPromise);
 
-	const viewsPromise = getVideoAnalytics(videoId).then((v) => v.count);
+	const viewsPromise = getVideoViewCount(videoId).then((v) => v.count);
 
 	const videoOrganizationRolePromise = (async () => {
 		if (!userId) return null;
@@ -854,6 +870,7 @@ async function AuthorizedContent({
 		ownerIsOverShareLimit,
 		resolvedImages,
 		dashboardDestination,
+		serverPlaybackSource,
 	] = await Promise.all([
 		spacesDataPromise,
 		sharedSpacesPromise,
@@ -869,6 +886,7 @@ async function AuthorizedContent({
 		overShareLimitPromise,
 		imagesPromise,
 		dashboardDestinationPromise,
+		serverPlaybackSourcePromise,
 		viewNotificationPromise,
 	]);
 
@@ -904,6 +922,25 @@ async function AuthorizedContent({
 	}
 
 	const metadata = (video.metadata as VideoMetadata) || {};
+	const deferredLoomRawFileKey = hasActiveUpload
+		? null
+		: getPendingLoomProcessing(metadata, video.owner.id, videoId);
+	if (deferredLoomRawFileKey) {
+		const rawFileKey = deferredLoomRawFileKey;
+		after(() =>
+			startDeferredLoomProcessing({
+				videoId,
+				ownerId: video.owner.id,
+				bucketId: video.bucket,
+				rawFileKey,
+			}).catch((error) => {
+				console.error(
+					`[ShareVideoPage] Error starting deferred processing for ${videoId}:`,
+					error,
+				);
+			}),
+		);
+	}
 	const aiGenerationStatus = metadata.aiGenerationStatus || null;
 
 	const initialAiData = {
@@ -1018,6 +1055,9 @@ async function AuthorizedContent({
 				}
 				data={videoWithOrganizationInfo}
 				initialPlaybackUrl={initialPlaybackUrlPromise}
+				serverPlaybackUrl={
+					serverPlaybackSource?.defaultStorage ? serverPlaybackSource.url : null
+				}
 				screenshotImageUrl={screenshotImageUrl}
 				videoSettings={videoWithOrganizationInfo.settings}
 				comments={commentsPromise}
@@ -1032,6 +1072,7 @@ async function AuthorizedContent({
 				canRecordMedia={canRecordMedia}
 				isEditProcessing={isEditProcessing}
 				recordingStopped={recordingStopped}
+				earlySegmentPlayback={earlySegmentPlayback}
 				defaultPlaybackSpeed={defaultPlaybackSpeed}
 				initialAiData={initialAiData}
 				aiGenerationAvailable={aiGenerationEnabled && aiProviderAvailable}

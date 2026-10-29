@@ -16,11 +16,13 @@ export type ShareVideoMetadataInput = {
 	name: string;
 	sourceType: ShareVideoSourceType;
 	webUrl: string;
+	width: number | null;
+	height: number | null;
 	/**
 	 * Two surfaces only answer on the default Cap origin: `proxy.ts` redirects
 	 * `/embed/` away from a custom domain, and `parseCapShareUrl` accepts share
-	 * URLs on `cap.so` and `cap.link` alone, so `/api/oembed` rejects a custom
-	 * domain `url`. Defaults to `webUrl`.
+	 * URLs on `cap.so`, `cap.link`, and the configured web host, so `/api/oembed`
+	 * rejects an unrelated custom domain `url`. Defaults to `webUrl`.
 	 */
 	canonicalWebUrl?: string;
 	advertiseIframelyPlayer?: boolean;
@@ -80,6 +82,8 @@ export const buildShareVideoMetadata = ({
 	webUrl,
 	canonicalWebUrl,
 	advertiseIframelyPlayer = false,
+	width,
+	height,
 }: ShareVideoMetadataInput): Metadata => {
 	const urls = getShareVideoUrls({
 		videoId,
@@ -89,6 +93,10 @@ export const buildShareVideoMetadata = ({
 	});
 	const title = `${name} | ${t("meta.titleSuffix")}`;
 	const description = t("meta.watchDescription");
+	const hasDimensions =
+		width != null && height != null && width > 0 && height > 0;
+	const playerWidth = hasDimensions ? width : PLAYER_WIDTH;
+	const playerHeight = hasDimensions ? height : PLAYER_HEIGHT;
 
 	return {
 		title,
@@ -101,7 +109,7 @@ export const buildShareVideoMetadata = ({
 								rel: "iframely player",
 								url: urls.playerUrl,
 								type: "text/html",
-								media: "(aspect-ratio: 16/9)",
+								media: `(aspect-ratio: ${playerWidth}/${playerHeight})`,
 							},
 						],
 					},
@@ -143,8 +151,8 @@ export const buildShareVideoMetadata = ({
 				{
 					url: urls.streamUrl,
 					secureUrl: urls.streamUrl,
-					width: PLAYER_WIDTH,
-					height: PLAYER_HEIGHT,
+					width: playerWidth,
+					height: playerHeight,
 					type: urls.streamContentType,
 				},
 			],
@@ -157,8 +165,8 @@ export const buildShareVideoMetadata = ({
 			players: {
 				playerUrl: urls.playerUrl,
 				streamUrl: urls.streamUrl,
-				width: PLAYER_WIDTH,
-				height: PLAYER_HEIGHT,
+				width: playerWidth,
+				height: playerHeight,
 			},
 		},
 		other: {

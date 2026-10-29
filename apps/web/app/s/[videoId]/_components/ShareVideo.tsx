@@ -29,7 +29,6 @@ import {
 	PreparingVideoOverlay,
 	RecordingInProgressOverlay,
 } from "./RecordingInProgress";
-import { ShareableLinkLimitOverlay } from "./ShareableLinkLimitOverlay";
 import {
 	isRecordingUpload,
 	shouldDeferPlaybackSource,
@@ -52,6 +51,11 @@ const CapVideoPlayer = dynamic(() =>
 );
 const HLSVideoPlayer = dynamic(() =>
 	import("./HLSVideoPlayer").then((m) => m.HLSVideoPlayer),
+);
+const ShareableLinkLimitOverlay = dynamic(() =>
+	import("./ShareableLinkLimitOverlay").then(
+		(m) => m.ShareableLinkLimitOverlay,
+	),
 );
 
 // Both ride outside the first paint: the tracker only mounts mid-upload (its
@@ -82,6 +86,7 @@ export const ShareVideo = forwardRef<
 			hasActiveUpload?: boolean;
 		};
 		initialPlaybackUrl?: Promise<string | null>;
+		serverPlaybackUrl?: string | null;
 		comments: MaybePromise<CommentWithAuthor[]>;
 		chapters?: { title: string; start: number }[];
 		areChaptersDisabled?: boolean;
@@ -99,6 +104,7 @@ export const ShareVideo = forwardRef<
 		showPlaybackStatusBadge?: boolean;
 		isEditProcessing: boolean;
 		recordingStopped?: boolean;
+		earlySegmentPlayback?: boolean;
 		defaultPlaybackSpeed?: number;
 		viewerIsOwner?: boolean;
 		callToAction?: ShareCallToAction | null;
@@ -108,6 +114,7 @@ export const ShareVideo = forwardRef<
 		{
 			data,
 			initialPlaybackUrl,
+			serverPlaybackUrl = null,
 			comments,
 			chapters = NO_CHAPTERS,
 			areCaptionsDisabled,
@@ -122,6 +129,7 @@ export const ShareVideo = forwardRef<
 			showPlaybackStatusBadge = false,
 			isEditProcessing,
 			recordingStopped = false,
+			earlySegmentPlayback = false,
 			defaultPlaybackSpeed,
 			viewerIsOwner = false,
 			callToAction = null,
@@ -477,8 +485,12 @@ export const ShareVideo = forwardRef<
 		let enableCrossOrigin = false;
 
 		if (isSegmentsSource) {
-			const requireComplete = userConfirmedStopped ? "&requireComplete=1" : "";
-			videoSrc = `/api/playlist?userId=${data.owner.id}&videoId=${data.id}&videoType=segments-master${requireComplete}`;
+			const stoppedMode = userConfirmedStopped
+				? earlySegmentPlayback
+					? "&earlyPlayback=1"
+					: "&requireComplete=1"
+				: "";
+			videoSrc = `/api/playlist?userId=${data.owner.id}&videoId=${data.id}&videoType=segments-master${stoppedMode}`;
 		} else if (isMp4Source) {
 			videoSrc = `/api/playlist?userId=${data.owner.id}&videoId=${data.id}&videoType=mp4`;
 			enableCrossOrigin = true;
@@ -555,6 +567,7 @@ export const ShareVideo = forwardRef<
 							videoSrc={videoSrc}
 							rawFallbackSrc={rawFallbackSrc}
 							initialPlaybackUrl={initialPlaybackUrl}
+							serverPlaybackUrl={serverPlaybackUrl}
 							duration={data.duration}
 							defaultPlaybackSpeed={defaultPlaybackSpeed}
 							showPlaybackStatusBadge={showPlaybackStatusBadge}
@@ -606,6 +619,9 @@ export const ShareVideo = forwardRef<
 							onSourceComplete={handleSourceComplete}
 							allowSegmentProbeDuringUpload={
 								isSegmentsSource && userConfirmedStopped
+							}
+							earlyPlayback={
+								isSegmentsSource && userConfirmedStopped && earlySegmentPlayback
 							}
 							captionLanguage={captionContext.selectedLanguage}
 							onCaptionLanguageChange={handleCaptionLanguageChange}

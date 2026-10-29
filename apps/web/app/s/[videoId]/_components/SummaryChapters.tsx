@@ -1,6 +1,6 @@
 import ReactMarkdown from "react-markdown";
+import { formatPlayerTime } from "@/lib/player-time";
 import { t } from "@/lib/translations";
-import { formatTimeMinutes } from "./utils/transcript-utils";
 
 type AiGenerationStatus =
 	| "QUEUED"
@@ -70,7 +70,7 @@ const SummaryChapters = ({
 								onClick={() => handleSeek(chapter.start)}
 							>
 								<span className="w-16 text-xs text-gray-500">
-									{formatTimeMinutes(chapter.start)}
+									{formatPlayerTime(chapter.start)}
 								</span>
 								<span className="ml-2 text-sm">{chapter.title}</span>
 							</button>

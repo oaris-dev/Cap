@@ -29,6 +29,8 @@ use gpui::{
     prelude::FluentBuilder, px, svg,
 };
 
+use crate::i18n::tr;
+use crate::theme::LocaleFont as _;
 use crate::{
     platform,
     session::{Phase, RecordingSession},
@@ -125,6 +127,20 @@ pub fn advance_playback_position(
 ) -> f32 {
     (position.max(0.) + pixels_per_second.max(0.) * elapsed_seconds.max(0.))
         .min(maximum_scroll.max(0.))
+}
+
+/// `playbackPosition = element.scrollTop`, with `if (element.scrollTop >=
+/// maximumScroll - 1) element.scrollTop = 0`: playback resumes from where the
+/// script actually is (a pause, or a wheel scroll between two plays, moves
+/// gpui's offset, not ours), and only restarts from the top once it reached the
+/// end. `offset_y` is gpui's scroll offset, which is negative.
+pub fn playback_resume_position(offset_y: f32, maximum_scroll: f32) -> f32 {
+    let position = (-offset_y).clamp(0., maximum_scroll.max(0.));
+    if position >= maximum_scroll - 1. {
+        0.
+    } else {
+        position
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +256,6 @@ impl TeleprompterWindow {
         let script_input = cx.new(|cx| {
             let mut input = ui::TextInputState::multi_line(window, cx);
             input.set_text(state.script.clone(), cx);
-            input.set_placeholder("Paste or type your script\u{2026}");
             input
         });
         let script_events = cx.subscribe_in(
@@ -406,13 +421,8 @@ impl TeleprompterWindow {
         if !self.has_script() || maximum <= 1. {
             return;
         }
-        // `playbackPosition = element.scrollTop`: a wheel scroll between two
-        // plays moves gpui's offset, not ours, so playback resumes from where
-        // the script actually is.
-        self.position = (-f32::from(self.scroll.offset().y)).clamp(0., maximum);
-        // `if (element.scrollTop >= maximumScroll - 1) element.scrollTop = 0`
-        if self.position >= maximum - 1. {
-            self.position = 0.;
+        self.position = playback_resume_position(f32::from(self.scroll.offset().y), maximum);
+        if self.position == 0. {
             self.apply_scroll();
         }
         self.settings_open = false;
@@ -566,6 +576,9 @@ fn stepped(fraction: f32, minimum: f32, maximum: f32, step: f32) -> f32 {
 impl Render for TeleprompterWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_appearance(window, cx);
+        self.script_input.update(cx, |input, _| {
+            input.set_placeholder(tr::dialog::teleprompter::placeholder())
+        });
         let theme = self.theme;
 
         div()
@@ -583,7 +596,8 @@ impl Render for TeleprompterWindow {
             .when_some(theme.teleprompter_shell_border(), |this, color| {
                 this.border_1().border_color(color)
             })
-            .font_family("Geist")
+            .font_family(crate::theme::UI_FONT)
+            .locale_font()
             // `body { font-weight: 500 }` (`ui-solid/src/main.css:189-192`).
             .font_weight(FontWeight::MEDIUM)
             .text_color(Hsla::from(theme.gray_12))
@@ -651,9 +665,9 @@ impl TeleprompterWindow {
                             .text_color(Hsla::from(theme.gray_9)),
                     )
                     .child(if self.playback_state.recording_paused {
-                        "Scrolling paused with recording"
+                        tr::dialog::teleprompter::paused()
                     } else {
-                        "This window is hidden from Cap recordings"
+                        tr::dialog::teleprompter::hidden()
                     }),
             );
 
@@ -857,7 +871,9 @@ impl TeleprompterWindow {
                             .text_right()
                             .text_size(px(10.))
                             .text_color(Hsla::from(theme.gray_9))
-                            .child(format!("{} wpm", self.state.words_per_minute)),
+                            .child(tr::dialog::teleprompter::words_per_minute(
+                                self.state.words_per_minute,
+                            )),
                     ),
             )
             .child(
@@ -1016,7 +1032,7 @@ impl TeleprompterWindow {
                 .child(self.render_setting_toggle(
                     "cue-markers",
                     "icons/chevron-right.svg",
-                    "Cue markers",
+                    tr::dialog::teleprompter::cue_markers(),
                     self.state.show_cue_markers,
                     cx.listener(|this, _, window, cx| {
                         this.state.show_cue_markers = !this.state.show_cue_markers;
@@ -1027,7 +1043,7 @@ impl TeleprompterWindow {
                 .child(self.render_setting_toggle(
                     "mirror",
                     "icons/flip-horizontal-2.svg",
-                    "Mirror text",
+                    tr::dialog::teleprompter::mirror(),
                     self.state.mirror,
                     cx.listener(|this, _, window, cx| {
                         // Persisted, but inert: this gpui rev has no flip
@@ -1069,6 +1085,7 @@ impl TeleprompterWindow {
                     .flex()
                     .flex_row()
                     .items_center()
+                    .min_w_0()
                     .gap(px(8.))
                     .child(
                         svg()
@@ -1077,7 +1094,7 @@ impl TeleprompterWindow {
                             .flex_shrink_0()
                             .text_color(Hsla::from(theme.gray_10)),
                     )
-                    .child(label),
+                    .child(div().min_w_0().truncate().child(label)),
             )
             // `<Toggle size="sm">` on bare glass.
             .child(ui::Toggle::glass(
@@ -1183,6 +1200,23 @@ mod tests {
         assert_eq!(calculate_playback_speed(120., 3, 350), 120.);
         assert_eq!(advance_playback_position(90., 100., 1000., 1.), 100.);
         assert_eq!(advance_playback_position(-5., 100., 0., 1.), 0.);
+    }
+
+    /// Pausing keeps the scroll offset, so pressing play again picks up where
+    /// the script stopped; only a script that already reached the end goes
+    /// back to the top (https://github.com/CapSoftware/Cap/issues/2081).
+    #[test]
+    fn playback_resumes_where_it_was_paused() {
+        let maximum = 1000.;
+        let mut position = playback_resume_position(0., maximum);
+        assert_eq!(position, 0.);
+        for _ in 0..90 {
+            position = advance_playback_position(position, maximum, 40., 1. / 30.);
+        }
+        assert!(position > 100.);
+        assert_eq!(playback_resume_position(-position, maximum), position);
+        assert_eq!(playback_resume_position(-(maximum - 0.5), maximum), 0.);
+        assert_eq!(playback_resume_position(25., maximum), 0.);
     }
 
     /// The ranges snap to their steps and stay inside their bounds, which is
